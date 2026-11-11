@@ -24,7 +24,6 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
 ## Direct messages
 - `● slick`: changelog (0.1.0, 2026-10-12).
-- `● feature-requests`: proposal → Turnstile → email asked in the input box → POST `/api/feature-request` (Worker `src/worker.js`: verifies Turnstile, stores a pending row in D1 `slick-feature-requests`, sends a confirmation email from noreply@slick.leonavas.com via Cloudflare Email Sending) → link `/api/confirm?t=…` marks it confirmed and redirects to `/?confirmed=<id>#requests` → "Your proposal was sent." History in localStorage `slick-requests` (id, text, status), pending ones re-checked via `GET /api/feature-request/:id`.
 - Wordmark: "SLICK" only, letter by letter in the app's four colors (blue, green, red, yellow, blue). No Slack mark.
 
 ## Screenshots

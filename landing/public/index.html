@@ -176,10 +176,6 @@ b, strong { color: var(--bright); }
   display: flex; flex-direction: column; justify-content: center; padding: .5lh 0 1.5lh;
   scroll-snap-align: start;
 }
-/* your proposal, until it has passed the human check and was sent */
-.msg.pending { opacity: .55; }
-.body .err { color: var(--red); }
-.body .ts { margin-top: .5lh; min-height: 65px; }
 .body .ver { color: var(--bright); }
 /* day divider, like Slack's: a rule with the date in a pill */
 .day {
@@ -487,7 +483,6 @@ td:first-child, td:first-child * { color: var(--yellow); font-weight: 700; }
       <button class="hdr unread" aria-expanded="true"><span class="arr">▾</span> <span data-i18n="gDms">Direct messages</span></button>
       <ul>
         <li><button class="row unread" data-ch="dm"><span class="ico on" aria-label="online">●</span><span class="name">slick</span><span class="badge">1</span></button></li>
-        <li><button class="row unread" data-ch="requests"><span class="ico on" aria-label="online">●</span><span class="name">feature-bugfix-requests</span><span class="badge"></span></button></li>
         <li><button class="row unread" data-ch="advanced"><span class="ico on" aria-label="online">●</span><span class="name">advanced-setup</span><span class="badge"></span></button></li>
       </ul>
     </div>
@@ -763,7 +758,6 @@ omarchy plugin enable leonavas.slack --section right</pre><button class="btn" da
                 <li><span data-i18n="r6"><span class="tag">[planned]</span> <b>Panes and tabs, tmux style.</b> Split the screen and keep conversations side by side, open each one in its own tab, and move between them with the keyboard.</span></li>
                 <li><span data-i18n="r4"><span class="tag">[planned]</span> <b>Plugins.</b> Scripting to extend it with your own commands.</span></li>
               </ul>
-              <p data-i18n="r5">Want one of these sooner, or something else? Tell me in <button class="chl" data-open="requests">● feature-bugfix-requests</button>.</p>
             </div>
           </div>
         </article>
@@ -1041,22 +1035,6 @@ omarchy plugin enable leonavas.slack --section right</pre><button class="btn" da
         </article>
       </section>
 
-      <!-- DM: feature requests; Enter in the box opens a prefilled GitHub issue -->
-      <section class="chan" id="ch-requests" data-topic="tReq">
-        <div class="chd"><span class="n">● feature-bugfix-requests</span><span class="t" data-topic-of="tReq"></span></div>
-        <div class="day" data-day="2026-10-12"></div>
-        <article class="msg">
-          <span class="av" aria-hidden="true">s</span>
-          <div>
-            <div><span class="who">slick</span><span class="app"> APP</span><span class="time">09:03</span></div>
-            <div class="body">
-              <p data-i18n="rq1">Missing something? Tell me what slick should do next: threads, reactions, a theme, a key you can't live without.</p>
-              <p data-i18n="rq2">Write your proposal in the box below and press <kbd>Enter</kbd>. After a quick check that you're human and a confirmation by email, it's sent.</p>
-            </div>
-          </div>
-        </article>
-      </section>
-
       <!-- DM: everything past the two install commands -->
       <section class="chan" id="ch-advanced" data-topic="tAdv">
         <div class="chd"><span class="n">● advanced-setup</span><span class="t" data-topic-of="tAdv"></span></div>
@@ -1291,9 +1269,6 @@ cookie = xoxd-…</pre></div>
     r10: '<span class="tag">[planejado]</span> <b>Mais tarde.</b> As mensagens que você salvou para depois e os seus lembretes numa lista só, como a aba Mais tarde do Slack, para concluir ou abrir direto na conversa.',
     r6: '<span class="tag">[planejado]</span> <b>Painéis e abas, no estilo tmux.</b> Divida a tela e deixe conversas lado a lado, abra cada uma numa aba própria e alterne entre elas pelo teclado.',
     r4: '<span class="tag">[planejado]</span> <b>Plugins.</b> Scripts para estender o app com os seus próprios comandos.',
-    r5: 'Quer algum desses antes, ou outra coisa? Me conta em <button class="chl" data-open="requests">● feature-bugfix-requests</button>.',
-    rq1: "Sentiu falta de algo? Conta o que o slick deveria fazer: threads, reações, um tema, um atalho sem o qual você não vive.",
-    rq2: "Escreva sua proposta na caixa abaixo e aperte <kbd>Enter</kbd>. Depois de uma verificação rápida de que você é humano e da confirmação por e-mail, ela é enviada.",
     o0: "<b>O slick se encaixa direitinho no Omarchy.</b>",
     o1: "Ele abre como qualquer app TUI do Omarchy: pelo launcher, na própria janela, com o próprio ícone. E segue o tema do Omarchy: o slick usa as cores do seu terminal, então quando você troca de tema, ele troca junto.",
     o2: '<b>O Slack na sua barra.</b> O plugin <code>leonavas.slack</code> para a barra do Omarchy roda em cima do slick e mostra o que está esperando sem abrir nada.',
@@ -1430,20 +1405,7 @@ cookie = xoxd-…</pre></div>
       hintCopy: "Enter copies the command", hintSend: "Enter sends · Shift+Enter new line",
       copyBtn: "[Copy]", copiedBtn: "[Copied]", copyCmd: "Copy", copiedCmd: "Copied",
       tWelcome: "Start here", tInstall: "Install, sign in, run", tWhy: "Rust, not a browser",
-      tDisk: "Small on disk", tKeys: "Everything has a key", tFeatures: "Shipping today", tRoadmap: "Planned, not shipped", tOmarchy: "Made for your desktop", tDm: "Changelog", tReq: "Ask for what's missing", tAdv: "Source builds, tokens and the details",
-      hintReq: "Enter sends your proposal",
-      rqCheck: "Before it goes out: one quick check that you're human.",
-      rqSending: "↻ Sending…",
-      rqSent: "✓ Your proposal was sent.",
-      rqEmail: "Thanks. Now your email: I'll send you a link, and the proposal goes out when you click it.",
-      emailPh: "you@example.com", hintEmail: "Enter sends the confirmation link",
-      rqMailed: "✉ Check your inbox: the confirmation link is on its way. Your proposal goes out once you click it.",
-      rqWaiting: "Waiting for you to confirm it by email.",
-      rqInvalid: "✗ That confirmation link expired or isn't valid. Send the proposal again.",
-      badEmail: "✗ That doesn't look like an email address.",
-      rqFail: "✗ Couldn't send it. Check your connection and try again.",
-      rqNoCaptcha: "✗ The human check didn't load. Allow challenges.cloudflare.com and try again.",
-      retry: "[Try again]",
+      tDisk: "Small on disk", tKeys: "Everything has a key", tFeatures: "Shipping today", tRoadmap: "Planned, not shipped", tOmarchy: "Made for your desktop", tDm: "Changelog", tAdv: "Source builds, tokens and the details",
       noUnread: "✓ No more unread channels",
       markedRead: n => `✓ ${n} marked as read`,
       nav: "Conversations", lang: "Language", toTop: "Back to the top",
@@ -1464,20 +1426,7 @@ cookie = xoxd-…</pre></div>
       hintCopy: "Enter copia o comando", hintSend: "Enter envia · Shift+Enter nova linha",
       copyBtn: "[Copiar]", copiedBtn: "[Copiado]", copyCmd: "Copiar", copiedCmd: "Copiado",
       tWelcome: "Comece por aqui", tInstall: "Instalar, entrar, rodar", tWhy: "Rust, não um navegador",
-      tDisk: "Pequeno no disco", tKeys: "Tudo tem um atalho", tFeatures: "Já funciona hoje", tRoadmap: "Planejado, ainda não lançado", tOmarchy: "Feito para o seu desktop", tDm: "Changelog", tReq: "Peça o que está faltando", tAdv: "Código-fonte, tokens e os detalhes",
-      hintReq: "Enter envia sua proposta",
-      rqCheck: "Antes de enviar: uma verificação rápida de que você é humano.",
-      rqSending: "↻ Enviando…",
-      rqSent: "✓ Sua proposta foi enviada.",
-      rqEmail: "Valeu. Agora seu e-mail: vou mandar um link, e a proposta é enviada quando você clicar nele.",
-      emailPh: "voce@exemplo.com", hintEmail: "Enter envia o link de confirmação",
-      rqMailed: "✉ Confira sua caixa de entrada: o link de confirmação está a caminho. A proposta é enviada assim que você clicar nele.",
-      rqWaiting: "Aguardando você confirmar pelo e-mail.",
-      rqInvalid: "✗ Esse link de confirmação expirou ou não é válido. Mande a proposta de novo.",
-      badEmail: "✗ Isso não parece um endereço de e-mail.",
-      rqFail: "✗ Não deu para enviar. Confira sua conexão e tente de novo.",
-      rqNoCaptcha: "✗ A verificação não carregou. Libere challenges.cloudflare.com e tente de novo.",
-      retry: "[Tentar de novo]",
+      tDisk: "Pequeno no disco", tKeys: "Tudo tem um atalho", tFeatures: "Já funciona hoje", tRoadmap: "Planejado, ainda não lançado", tOmarchy: "Feito para o seu desktop", tDm: "Changelog", tAdv: "Código-fonte, tokens e os detalhes",
       noUnread: "✓ Nenhum canal não lido",
       markedRead: n => `✓ ${n} marcado como lido`,
       nav: "Conversas", lang: "Idioma", toTop: "Voltar ao início",
@@ -1518,7 +1467,6 @@ cookie = xoxd-…</pre></div>
     $(".lang").setAttribute("aria-label", t("lang"));
     $$(".lang [data-lang]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.lang === lang)));
     $$(".btn[data-copy]").forEach(b => { b.textContent = t("copyBtn"); });
-    $$("[data-t]").forEach(el => { el.textContent = t(el.dataset.t); });
     $$(".day").forEach(el => { el.innerHTML = `<span>${dayLabel(el.dataset.day)}</span>`; });
     if (persist) store.set("fs-lang", lang);
     renderHeader();
@@ -1585,7 +1533,7 @@ cookie = xoxd-…</pre></div>
   }
 
   // Direct messages are named after who you talk to, not the channel id.
-  const DMS = { dm: "slick", requests: "feature-bugfix-requests", advanced: "advanced-setup" };
+  const DMS = { dm: "slick", advanced: "advanced-setup" };
   const label = id => DMS[id] || "#" + id;
   function renderHeader() {
     const sec = $(`#ch-${current}`);
@@ -1600,7 +1548,7 @@ cookie = xoxd-…</pre></div>
       return `<i class="${id === current ? "cur" : unread ? "" : "rd"}"></i>`;
     }).join("");
     $("#boxLabel").textContent = t("message")(label(current));
-    $("#box").placeholder = awaiting && current === "requests" ? t("emailPh") : t("message")(label(current));
+    $("#box").placeholder = t("message")(label(current));
   }
 
   function refreshHeaders() {
@@ -1612,7 +1560,6 @@ cookie = xoxd-…</pre></div>
   // Reaching a channel marks it read, like conversations.mark in the app.
   function setCurrent(id) {
     if (id === current) return;
-    const prev = current;
     current = id;
     $$(".side .row").forEach(r => r.classList.toggle("current", r.dataset.ch === id));
     const r = $(`.side .row[data-ch="${id}"]`);
@@ -1623,8 +1570,6 @@ cookie = xoxd-…</pre></div>
     refreshHeaders();
     if (!side.contains(document.activeElement)) markSel(id, false);
     renderHeader();
-    if (id === "requests" && box.value.trim() === INSTALL) { box.value = ""; grow(); }
-    else if (prev === "requests" && !box.value.trim()) { box.value = INSTALL; grow(); }
     updateHint();
     history.replaceState(null, "", location.pathname + location.search + (id === "welcome" ? "" : "#" + id));
   }
@@ -1736,139 +1681,9 @@ cookie = xoxd-…</pre></div>
   const box = $("#box");
   function grow() { box.style.height = "auto"; box.style.height = box.scrollHeight + "px"; }
   function updateHint() {
-    const req = current === "requests";
-    $("#hint").textContent = box.value.trim() === INSTALL ? t("hintCopy")
-      : req && awaiting ? t("hintEmail") : req ? t("hintReq") : t("hintSend");
+    $("#hint").textContent = box.value.trim() === INSTALL ? t("hintCopy") : t("hintSend");
   }
 
-  // ---------- feature requests: write → human check → email → confirmation link → sent ----------
-  // The real Turnstile site key on the live domain; Cloudflare's always-pass test key anywhere else.
-  const TURNSTILE_SITEKEY = location.hostname === "slick.leonavas.com" ? "0x4AAAAAAFUPaCg1TqpmvmtW" : "1x00000000000000000000AA";
-  const REQUEST_API = "/api/feature-request";
-  const SENT_KEY = "slick-requests";
-  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  const sentList = () => { try { return JSON.parse(store.get(SENT_KEY) || "[]"); } catch { return []; } };
-  const saveList = list => store.set(SENT_KEY, JSON.stringify(list.slice(-50)));
-  const say = (body, key) => { const p = body.querySelector("p"); p.dataset.t = key; p.textContent = t(key); };
-  const mines = new Map();  // proposal id → your message, dimmed until it's confirmed
-  let awaiting = null;      // { text, mine, token } after the human check, until the email is in
-  let tsLoad = null;
-  function turnstile() {
-    if (window.turnstile) return Promise.resolve(window.turnstile);
-    return tsLoad || (tsLoad = new Promise((ok, fail) => {
-      const sc = document.createElement("script");
-      sc.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
-      sc.async = true;
-      sc.onload = () => ok(window.turnstile);
-      sc.onerror = () => { tsLoad = null; sc.remove(); fail(); };
-      document.head.append(sc);
-    }));
-  }
-  function failed(body, key, retry) {
-    body.innerHTML = `<p class="err"></p><p><button type="button" class="btn"></button></p>`;
-    body.querySelector(".err").textContent = t(key);
-    const b = body.querySelector("button");
-    b.textContent = t("retry");
-    b.addEventListener("click", () => { body.closest(".msg").remove(); retry(); });
-  }
-  async function request(text, mine) {
-    mine.classList.add("pending");
-    const body = reply(`<p></p><div class="ts"></div>`);
-    say(body, "rqCheck");
-    const again = () => request(text, mine);
-    let ts;
-    try { ts = await turnstile(); } catch { failed(body, "rqNoCaptcha", again); return; }
-    ts.render(body.querySelector(".ts"), {
-      sitekey: TURNSTILE_SITEKEY,
-      theme: "dark",
-      language: lang === "pt" ? "pt-br" : "en",
-      "error-callback": () => failed(body, "rqNoCaptcha", again),
-      callback: token => {
-        body.innerHTML = "<p></p>";
-        say(body, "rqEmail");
-        awaiting = { text, mine, token };
-        renderHeader(); updateHint();
-        box.focus({ preventScroll: true });
-      },
-    });
-  }
-  async function sendWithEmail(email) {
-    const { text, mine, token } = awaiting;
-    awaiting = null;
-    renderHeader(); updateHint();
-    post(email);
-    const body = reply("<p></p>");
-    say(body, "rqSending");
-    let id;
-    try {
-      const r = await fetch(REQUEST_API, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text, email, token, lang }),
-      });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok || !d.id) throw new Error(d.error || String(r.status));
-      id = d.id;
-    } catch (e) {
-      failed(body, e.message === "bad_email" ? "badEmail" : "rqFail", () => request(text, mine));
-      return;
-    }
-    say(body, "rqMailed");
-    body.dataset.req = id;
-    mines.set(id, mine);
-    saveList([...sentList(), { id, text, at: Date.now(), status: "pending" }]);
-  }
-  function markConfirmed(id) {
-    const list = sentList();
-    const e = list.find(x => x.id === id);
-    if (e && e.status !== "confirmed") { e.status = "confirmed"; saveList(list); }
-    const body = document.querySelector(`[data-req="${id}"]`);
-    if (body) { say(body, "rqSent"); delete body.dataset.req; }
-    if (mines.has(id)) { mines.get(id).classList.remove("pending"); mines.delete(id); }
-  }
-  // Pending proposals may have been confirmed in another tab or on another device.
-  function checkPending() {
-    for (const e of sentList()) {
-      if (e.status !== "pending" || !e.id) continue;
-      fetch(`${REQUEST_API}/${e.id}`)
-        .then(r => (r.ok ? r.json() : null))
-        .then(d => { if (d && d.status === "confirmed") markConfirmed(e.id); })
-        .catch(() => {});
-    }
-  }
-  // Proposals sent from this browser come back into the conversation; the confirmation link lands here too.
-  function restoreSent() {
-    const q = new URLSearchParams(location.search);
-    const confirmed = q.get("confirmed");
-    const invalid = q.get("confirm") === "invalid";
-    const list = sentList();
-    for (const e of list) if (e.id && e.id === confirmed) e.status = "confirmed";
-    saveList(list);
-    for (const e of list) {
-      const when = new Date(e.at);
-      const mine = post(e.text, when, "requests");
-      mine.classList.remove("fresh");
-      const body = reply("<p></p>", when, "requests");
-      body.closest(".msg").classList.remove("fresh");
-      if (e.status === "pending" && e.id) {
-        mine.classList.add("pending");
-        say(body, "rqWaiting");
-        body.dataset.req = e.id;
-        mines.set(e.id, mine);
-      } else say(body, "rqSent");
-    }
-    if (confirmed && !list.some(e => e.id === confirmed)) say(reply("<p></p>", new Date(), "requests"), "rqSent");
-    if (invalid) {
-      const body = reply(`<p class="err"></p>`, new Date(), "requests");
-      say(body, "rqInvalid");
-    }
-    if (confirmed || invalid) {
-      q.delete("confirmed"); q.delete("confirm");
-      history.replaceState(null, "", location.pathname + (q.size ? "?" + q : "") + "#requests");
-    }
-    checkPending();
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) checkPending(); });
-  }
   box.addEventListener("input", () => { grow(); updateHint(); measure(); });
   const hhmm = d => String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
   // ---------- day dividers: "Today", "Yesterday" or "Monday, October 12th", like Slack ----------
@@ -1896,38 +1711,20 @@ cookie = xoxd-…</pre></div>
     el.innerHTML = `<span>${dayLabel(key)}</span>`;
     ch.append(el);
   }
-  function post(text, at = new Date(), where = current) {
-    const art = document.createElement("article");
+  function post(text) {
+    const art = document.createElement("article"), at = new Date();
     art.className = "msg fresh";
-    const hh = hhmm(at);
-    art.innerHTML = `<span class="av you" aria-hidden="true">y</span><div><div><span class="who"></span><span class="time">${hh}</span></div><div class="body"><p></p></div></div>`;
+    art.innerHTML = `<span class="av you" aria-hidden="true">y</span><div><div><span class="who"></span><span class="time">${hhmm(at)}</span></div><div class="body"><p></p></div></div>`;
     art.querySelector(".who").textContent = lang === "pt" ? "você" : "you";
     art.querySelector("p").textContent = text;
     art.querySelector("p").style.whiteSpace = "pre-wrap";
-    dayFor(where, at);
-    $(`#ch-${where}`).append(art);
-    if (where === current) art.scrollIntoView({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
-    return art;
-  }
-  // A reply from the app; returns its body so it can change as things happen.
-  function reply(html, at = new Date(), where = current) {
-    const art = document.createElement("article");
-    art.className = "msg fresh";
-    art.innerHTML = `<span class="av" aria-hidden="true">s</span><div><div><span class="who">slick</span><span class="app"> APP</span><span class="time">${hhmm(at)}</span></div><div class="body">${html}</div></div>`;
-    dayFor(where, at);
-    $(`#ch-${where}`).append(art);
-    if (where === current) art.scrollIntoView({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
-    return art.querySelector(".body");
+    dayFor(current, at);
+    $(`#ch-${current}`).append(art);
+    art.scrollIntoView({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
   }
   function submit() {
     const v = box.value.trim();
     if (!v) return;
-    if (awaiting && current === "requests") {
-      if (!EMAIL_RE.test(v)) { flash(t("badEmail"), "err"); return; }
-      box.value = ""; grow();
-      sendWithEmail(v);
-      return;
-    }
     if (v === INSTALL) { copy(INSTALL); return; }
     if (v.startsWith("/")) {
       const [cmd, arg] = v.slice(1).split(/\s+/);
@@ -1936,10 +1733,7 @@ cookie = xoxd-…</pre></div>
       else if (cmd === "source") open("advanced", { focusInput: true });
       else if (COPY[cmd] || cmd === "install") open("install", { focusInput: true });
       else { flash(t("unknown"), "err"); return; }
-    } else {
-      const mine = post(v);
-      if (current === "requests") request(v, mine);
-    }
+    } else post(v);
     box.value = ""; grow(); updateHint();
   }
   box.addEventListener("keydown", e => {
@@ -2004,7 +1798,6 @@ cookie = xoxd-…</pre></div>
   const saved = store.get("fs-lang");
   const nav = (navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || "en"]);
   setLang(qLang || saved || (nav.some(l => /^pt\b/i.test(l)) ? "pt" : "en"), false);
-  restoreSent();
 
   // the trailer plays in place of its poster, with sound, on the visitor's click
   $("#trailerPlay").addEventListener("click", () => {

@@ -183,6 +183,11 @@ The screenshots come from it: `scripts/demo-shots.sh` takes them all off screen
 `landing/public/screens`. `SLICK_DEMO_SCRIPT` drives the app for them (keys,
 clicks, typing; see `src/demo.rs`).
 
+`SLICK_DEMO_GRID=1` makes it an Enterprise Grid org that restricts
+`users.conversations`, `stars.list`, `conversations.members` and
+`conversations.list`, so slick takes them from `client.userBoot` and the
+edge API instead.
+
 ## Sign in
 
 Just run `slick`: with no session yet it opens the sign-in screen by itself.

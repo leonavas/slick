@@ -2,11 +2,11 @@
 
 use crate::i18n::tr;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub type Res<T> = Result<T, String>;
 
@@ -26,7 +26,16 @@ pub struct Slack {
     wanted: Arc<Mutex<Vec<String>>>,
     /// Away set by hand: the socket stops saying someone is there (`rtm`).
     away: Arc<std::sync::atomic::AtomicBool>,
+    /// The last `client.userBoot` answer, the token it was for and when it came
+    /// (`user_boot`): start-up asks for it up to three times at once.
+    boot_cache: Arc<Mutex<Option<(String, Instant, Value)>>>,
+    /// The edge API's org id (`org`) and the token it was for: it doesn't change in a session.
+    org_cache: Arc<Mutex<Option<(String, String)>>>,
 }
+
+/// How long a `client.userBoot` answer is used again: start-up's calls, the
+/// last of them `REST_AFTER` after the first, but not a later refresh.
+const BOOT_FOR: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub struct AuthInfo {
@@ -454,7 +463,14 @@ impl Slack {
             .timeout(Duration::from_secs(20))
             .user_agent(concat!("slick/", env!("CARGO_PKG_VERSION")))
             .build();
-        Self { agent, creds: Arc::new(RwLock::new(creds)), wanted: Default::default(), away: Default::default() }
+        Self {
+            agent,
+            creds: Arc::new(RwLock::new(creds)),
+            wanted: Default::default(),
+            away: Default::default(),
+            boot_cache: Default::default(),
+            org_cache: Default::default(),
+        }
     }
 
     /// The session in use (`config::save_workspace` after `auth.test`, the cookie check).
@@ -530,6 +546,9 @@ impl Slack {
         if let Ok(mut c) = self.creds.write() {
             *c = creds;
         }
+        // Another session: nothing the old one was told is its.
+        *self.boot_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.org_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     fn authed(&self, req: ureq::Request) -> ureq::Request {
@@ -766,7 +785,7 @@ impl Slack {
     /// Only the conversations the user is in, archived channels included:
     /// Slack keeps their members, so the same call lists them, a page or so more.
     pub fn conversations(&self) -> Res<Vec<Conversation>> {
-        let list = self.paginate(
+        let list = match self.paginate(
             "users.conversations",
             &[
                 ("types", "public_channel,private_channel,mpim,im"),
@@ -774,7 +793,12 @@ impl Slack {
                 ("limit", "200"),
             ],
             "channels",
-        )?;
+        ) {
+            Ok(list) => list,
+            // An Enterprise Grid org can forbid the method; the official client's start-up call still lists them.
+            Err(e) if e.ends_with("enterprise_is_restricted") => return self.boot_conversations().map_err(|_| e),
+            Err(e) => return Err(e),
+        };
         Ok(list
             .iter()
             .filter(|c| !c["is_user_deleted"].as_bool().unwrap_or(false))
@@ -782,22 +806,131 @@ impl Slack {
             .collect())
     }
 
+    /// The user's conversations from `client.userBoot`, for where `users.conversations`
+    /// is restricted: its `channels` (group DMs among them), `mpims` should it ever
+    /// have them, and `ims`. An open one it leaves out (`has_more_mpdms`) is asked
+    /// for on its own. Session tokens only.
+    fn boot_conversations(&self) -> Res<Vec<Conversation>> {
+        let v = self.user_boot()?;
+        let mut seen = HashSet::new();
+        let mut out: Vec<Conversation> = ["channels", "mpims", "ims"]
+            .iter()
+            .flat_map(|k| v[*k].as_array().into_iter().flatten())
+            .filter(|c| !c["is_user_deleted"].as_bool().unwrap_or(false))
+            .map(parse_conversation)
+            .filter(|c| !c.id.is_empty() && seen.insert(c.id.clone()))
+            .collect();
+        let missing: Vec<String> =
+            v["is_open"].as_array().into_iter().flatten().filter_map(|i| i.as_str()).filter(|i| !seen.contains(*i)).map(String::from).collect();
+        out.extend(missing.iter().filter_map(|id| self.conversation(id).ok()));
+        Ok(out)
+    }
+
     /// Every public channel of the workspace, archived ones too (`Directory`).
     pub fn directory(&self) -> Res<Vec<DirChan>> {
         let mut out = Vec::new();
         let params = [("types", "public_channel"), ("exclude_archived", "false"), ("limit", "1000")];
-        self.paginate_each("conversations.list", &params, "channels", |c| {
-            out.push(DirChan {
-                id: str_of(&c["id"]),
-                name: str_of(&c["name"]),
-                archived: c["is_archived"].as_bool() == Some(true),
-                members: c["num_members"].as_u64().unwrap_or(0) as u32,
-                updated: updated(c),
-                folded: Default::default(),
-            });
-        })?;
+        let dir = |c: &Value| DirChan {
+            id: str_of(&c["id"]),
+            name: str_of(&c["name"]),
+            archived: c["is_archived"].as_bool() == Some(true),
+            members: c["num_members"].as_u64().unwrap_or(0) as u32,
+            updated: updated(c),
+            folded: Default::default(),
+        };
+        match self.paginate_each("conversations.list", &params, "channels", |c| out.push(dir(c))) {
+            Ok(()) => {}
+            // Restricted on some Enterprise Grid orgs: the channel browser's own search
+            // lists them there, private ones it can see too, without member counts.
+            Err(e) if e.ends_with("enterprise_is_restricted") => {
+                out.clear();
+                let all = self.edge_pages("channels/search", json!({ "query": "", "count": 1000 })).map_err(|_| e)?;
+                out.extend(all.iter().filter(|c| c["is_private"].as_bool() != Some(true)).map(dir));
+            }
+            Err(e) => return Err(e),
+        }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
+    }
+
+    /// A channel's members from the edge API, for where `conversations.members`
+    /// is restricted (an Enterprise Grid org); session tokens only.
+    pub fn edge_members(&self, chan: &str) -> Res<Vec<String>> {
+        let all = self.edge_pages("users/list", json!({ "channels": [chan], "filter": "everyone", "count": 100 }))?;
+        Ok(all.iter().filter_map(|u| u["id"].as_str().map(String::from)).collect())
+    }
+
+    /// Every page of an edge API list (`results`, `next_marker`), up to 50.
+    fn edge_pages(&self, path: &str, body: Value) -> Res<Vec<Value>> {
+        let org = self.org()?;
+        let mut out = Vec::new();
+        let mut body = body;
+        for _ in 0..50 {
+            let v = self.edge(&org, path, &body)?;
+            out.extend(v["results"].as_array().into_iter().flatten().cloned());
+            match v["next_marker"].as_str().filter(|m| !m.is_empty()) {
+                Some(m) => body["marker"] = json!(m),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// The id the edge API is addressed by: the org's on Enterprise Grid, else the workspace's.
+    fn org(&self) -> Res<String> {
+        let token = self.creds().token;
+        let mut cache = self.org_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, org)) = cache.as_ref().filter(|(t, _)| *t == token) {
+            return Ok(org.clone());
+        }
+        let v = self.call("auth.test", &[])?;
+        let org = [&v["enterprise_id"], &v["team_id"]].iter().find_map(|i| i.as_str().filter(|s| !s.is_empty())).unwrap_or_default().to_string();
+        *cache = Some((token, org.clone()));
+        Ok(org)
+    }
+
+    /// `client.userBoot`, its answer shared for `BOOT_FOR` by `boot` and the
+    /// fallbacks of `conversations` and `stars`, which start-up runs together:
+    /// the first one asks, the others wait for it and take its answer.
+    fn user_boot(&self) -> Res<Value> {
+        let token = self.creds().token;
+        let mut cache = self.boot_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, _, v)) = cache.as_ref().filter(|(t, at, _)| *t == token && at.elapsed() < BOOT_FOR) {
+            return Ok(v.clone());
+        }
+        let v = self.call("client.userBoot", &[])?;
+        *cache = Some((token, Instant::now(), v.clone()));
+        Ok(v)
+    }
+
+    /// Slack's edge API (`edgeapi.slack.com/cache/<org>/<path>`), which the web
+    /// client asks for some lists. Undocumented: only session tokens get it.
+    fn edge(&self, org: &str, path: &str, body: &Value) -> Res<Value> {
+        #[cfg(feature = "demo")]
+        if crate::demo::on() {
+            return crate::demo::call(&self.creds().token, &format!("edge/{path}"), &[("channel", body["channels"][0].as_str().unwrap_or(""))]);
+        }
+        let mut body = body.clone();
+        body["token"] = json!(self.creds().token);
+        let url = format!("https://edgeapi.slack.com/cache/{org}/{path}");
+        // Rate limits as in `call`.
+        for _ in 0..8 {
+            match self.authed(self.agent.post(&url)).send_json(&body) {
+                Ok(resp) => {
+                    let v: Value = resp.into_json().map_err(|e| e.to_string())?;
+                    if v["ok"].as_bool() == Some(true) {
+                        return Ok(v);
+                    }
+                    return Err(format!("edge {path}: {}", v["error"].as_str().unwrap_or(tr("unknown error", "erro desconhecido"))));
+                }
+                Err(ureq::Error::Status(429, resp)) => {
+                    let secs = resp.header("Retry-After").and_then(|s| s.parse().ok()).unwrap_or(2u64);
+                    std::thread::sleep(Duration::from_secs(secs.min(30)));
+                }
+                Err(e) => return Err(format!("edge {path}: {e}")),
+            }
+        }
+        Err(format!("edge {path}: rate limited"))
     }
 
     /// Joins a public channel; Slack answers with it as the user now sees it.
@@ -862,7 +995,7 @@ impl Slack {
 
     /// Undocumented, like `sections`: the start-up call of Slack's web client.
     pub fn boot(&self) -> Res<Boot> {
-        let v = self.call("client.userBoot", &[])?;
+        let v = self.user_boot()?;
         Ok(Boot {
             open: v["is_open"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(String::from)).collect(),
             sidebar_avatars: v["prefs"]["show_sidebar_avatars"].as_bool().unwrap_or(true),
@@ -926,7 +1059,15 @@ impl Slack {
 
     /// Starred conversations: Slack's "Favoritos".
     pub fn stars(&self) -> Res<Vec<String>> {
-        let items = self.paginate("stars.list", &[("limit", "200")], "items")?;
+        let items = match self.paginate("stars.list", &[("limit", "200")], "items") {
+            Ok(items) => items,
+            // Restricted like `users.conversations`: `client.userBoot` has the starred ones too.
+            Err(e) if e.ends_with("enterprise_is_restricted") => {
+                let v = self.user_boot().map_err(|_| e)?;
+                return Ok(v["starred"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(String::from)).collect());
+            }
+            Err(e) => return Err(e),
+        };
         Ok(items
             .iter()
             .filter(|i| matches!(i["type"].as_str(), Some("im" | "mpim" | "channel" | "group")))

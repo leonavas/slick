@@ -771,13 +771,13 @@ impl Slack {
         Ok(users.with_system())
     }
 
-    /// An app's name and picture, for its messages that don't carry them.
     /// A file whole (`files.info`), for one a message announced half-told.
     pub fn file_info(&self, id: &str) -> Res<File> {
         let v = self.call("files.info", &[("file", id)])?;
         Ok(parse_file(&v["file"]))
     }
 
+    /// An app's name and picture, for its messages that don't carry them.
     pub fn bot(&self, id: &str) -> Res<(String, String)> {
         let v = self.call("bots.info", &[("bot", id)])?;
         let b = &v["bot"];

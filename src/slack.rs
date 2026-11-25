@@ -344,6 +344,19 @@ pub struct File {
     pub pretty_type: String,
     #[serde(default)]
     pub mimetype: String,
+    /// `snippet`, `post`, `hosted`…, and a snippet's own title.
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub title: String,
+    /// A text file's first lines, and how many it has in all (`lines`) or
+    /// besides those (`lines_more`).
+    #[serde(default)]
+    pub preview: String,
+    #[serde(default)]
+    pub lines: u64,
+    #[serde(default)]
+    pub lines_more: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1389,6 +1402,11 @@ pub(crate) fn parse_file(f: &Value) -> File {
         filetype: str_of(&f["filetype"]),
         pretty_type: str_of(&f["pretty_type"]),
         mimetype: str_of(&f["mimetype"]),
+        mode: str_of(&f["mode"]),
+        title: str_of(&f["title"]),
+        preview: str_of(&f["preview"]),
+        lines: f["lines"].as_u64().unwrap_or(0),
+        lines_more: f["lines_more"].as_u64().unwrap_or(0),
     }
 }
 

@@ -1,27 +1,45 @@
-//! Pictures pasted into a message box, sent with the message like Slack's
-//! attachments. Terminals don't forward pasted images, so the clipboard is
-//! read directly: wl-paste or xclip on Linux, arboard elsewhere.
+//! Files sent with a message, like Slack's attachments: pictures pasted into
+//! a message box and snippets from the snippet dialog. Terminals don't
+//! forward pasted images, so the clipboard is read directly: wl-paste or
+//! xclip on Linux, arboard elsewhere. Each card shows its upload's progress,
+//! and its ✕ cancels the upload until Slack starts posting the message.
 
 use crate::app::{App, Event, Focus, Img, ImgRef};
 use crate::editor::Editor;
+use crate::files::{bar, Progress};
 use crate::i18n::tr;
 use crate::slack::{escape, Res, Slack};
-use crate::ui::{dim, draw_image};
+use crate::ui::{dim, draw_image, truncate};
+use crossterm::event::{KeyCode, KeyEvent};
 use image::DynamicImage;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Paragraph};
 use ratatui::Frame;
+use std::io::Read;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
 /// The card: a few rows of picture in a rounded border.
 pub const CARD_ROWS: u16 = 6;
 const PIC_ROWS: u16 = CARD_ROWS - 2;
+/// A snippet's card: room for its title and first lines.
+const SNIPPET_COLS: u16 = 24;
 /// Slack takes up to 10 files per message.
 const MAX: usize = 10;
+/// Bytes per write while uploading: the bar moves, and a cancel lands, between them.
+const SLICE: usize = 64 << 10;
+/// Wakes the screen this often at most while bytes go up.
+const PROGRESS_EVERY: Duration = Duration::from_millis(200);
+
+// Where an upload is: its bytes going up, Slack posting the message (too
+// late to cancel), or cancelled.
+const UPLOADING: u8 = 0;
+const POSTING: u8 = 1;
+const CANCELLED: u8 = 2;
 
 /// Where a box sends: the conversation, or a thread in it.
 #[derive(Clone, PartialEq)]
@@ -37,26 +55,47 @@ pub struct Attachment {
     pub bytes: Arc<Vec<u8>>,
     pub w: u32,
     pub h: u32,
-    /// On its way with the message: no ✕, and kept until Slack has it.
-    pub sending: bool,
+    /// A snippet typed in: its title and Slack's `snippet_type` ("" lets Slack tell).
+    pub snippet: Option<(String, String)>,
+    /// On its way with the message, in the upload with this id: kept until
+    /// Slack has it.
+    pub sending: Option<u64>,
+    /// How far its bytes got.
+    pub progress: Arc<Progress>,
 }
 
-/// Each box keeps its own pictures, so they wait in their conversation or
+/// Files going up together, with the text they go with.
+struct Upload {
+    id: u64,
+    to: Target,
+    keys: Vec<String>,
+    text: String,
+    phase: Arc<AtomicU8>,
+}
+
+/// Each box keeps its own files, so they wait in their conversation or
 /// thread like a draft.
 #[derive(Default)]
 pub struct Attach {
     items: Vec<(Target, Attachment)>,
-    /// Each card's ✕ on screen and the picture it removes.
+    /// Each card's ✕ on screen and the file it removes (or whose upload it cancels).
     pub close: Vec<(Rect, String)>,
     reading: bool,
     next: u64,
     /// The status line set while uploading, cleared when it ends.
     status: Option<String>,
+    uploads: Vec<Upload>,
+    /// Snippets in messages: which are open, and their whole text.
+    pub snippets: crate::snippet::Views,
 }
 
 impl Attach {
     fn of<'a>(&'a self, to: &'a Target) -> impl Iterator<Item = &'a Attachment> + 'a {
         self.items.iter().filter(move |(t, _)| t == to).map(|(_, a)| a)
+    }
+
+    fn phase(&self, id: u64) -> Option<u8> {
+        self.uploads.iter().find(|u| u.id == id).map(|u| u.phase.load(Ordering::SeqCst))
     }
 }
 
@@ -68,13 +107,60 @@ pub enum Clip {
 
 pub enum Ev {
     Clip { to: Target, key: String, res: Res<Clip> },
-    Sent { to: Target, keys: Vec<String>, text: String, res: Res<()> },
+    Sent { id: u64, res: Res<()> },
+    /// A snippet's whole text, fetched for a message (`snippet`).
+    Snippet(crate::snippet::Ev),
+}
+
+/// A file for `Slack::upload`.
+pub struct Up {
+    pub name: String,
+    /// Shown instead of the name; empty for the name.
+    pub title: String,
+    /// Slack's `snippet_type`, to show it as code; empty for any other file.
+    pub snippet_type: String,
+    pub bytes: Arc<Vec<u8>>,
+    pub progress: Arc<Progress>,
+}
+
+/// A file's bytes a slice at a time, counted into its progress; stops when
+/// the upload is cancelled.
+struct Slices<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    progress: &'a Progress,
+    phase: &'a AtomicU8,
+    tick: &'a (dyn Fn() + Send + Sync),
+    last: Instant,
+}
+
+impl Read for Slices<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.phase.load(Ordering::SeqCst) == CANCELLED {
+            return Err(std::io::Error::other("cancelled"));
+        }
+        let n = buf.len().min(SLICE).min(self.bytes.len() - self.pos);
+        buf[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
+        self.pos += n;
+        self.progress.done.store(self.pos as u64, Ordering::Relaxed);
+        if self.last.elapsed() >= PROGRESS_EVERY {
+            self.last = Instant::now();
+            (self.tick)();
+        }
+        Ok(n)
+    }
+}
+
+fn cancelled() -> String {
+    tr("upload cancelled", "envio cancelado").to_string()
 }
 
 impl Slack {
-    /// Slack's upload flow: an address per file, the bytes there, then one
-    /// message holding all of them with the text as its comment.
-    pub fn upload(&self, chan: &str, thread: Option<&str>, text: &str, files: &[(String, Arc<Vec<u8>>)]) -> Res<()> {
+    /// Slack's upload flow: an address per file, the bytes there (a slice at
+    /// a time, into each file's progress), then one message holding all of
+    /// them with the text as its comment. `phase` stops it while the bytes go
+    /// up; once Slack posts the message it can no longer be cancelled.
+    pub fn upload(&self, chan: &str, thread: Option<&str>, text: &str, files: &[Up], phase: &AtomicU8, tick: &(dyn Fn() + Send + Sync)) -> Res<()> {
         // The upload address is presigned: no credentials, but room for big files.
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(20))
@@ -83,19 +169,35 @@ impl Slack {
             .user_agent(concat!("slick/", env!("CARGO_PKG_VERSION")))
             .build();
         let mut done = Vec::new();
-        for (name, bytes) in files {
-            let len = bytes.len().to_string();
-            let v = self.call("files.getUploadURLExternal", &[("filename", name.as_str()), ("length", len.as_str())])?;
+        for f in files {
+            if phase.load(Ordering::SeqCst) == CANCELLED {
+                return Err(cancelled());
+            }
+            let (name, len) = (f.name.as_str(), f.bytes.len().to_string());
+            let mut p = vec![("filename", name), ("length", len.as_str())];
+            if !f.snippet_type.is_empty() {
+                p.push(("snippet_type", f.snippet_type.as_str()));
+            }
+            let v = self.call("files.getUploadURLExternal", &p)?;
             let (Some(url), Some(id)) = (v["upload_url"].as_str(), v["file_id"].as_str()) else {
                 return Err("files.getUploadURLExternal: no upload_url".into());
             };
-            agent
-                .post(url)
-                .set("Content-Type", "application/octet-stream")
-                .send_bytes(bytes)
-                .map_err(|e| trf!("upload {name}: {e}", "envio de {name}: {e}"))?;
-            done.push(serde_json::json!({ "id": id, "title": name }));
+            f.progress.total.store(f.bytes.len() as u64, Ordering::Relaxed);
+            let body = Slices { bytes: &f.bytes, pos: 0, progress: &f.progress, phase, tick, last: Instant::now() };
+            // A known length: sent as is, not chunked.
+            let sent = agent.post(url).set("Content-Type", "application/octet-stream").set("Content-Length", &len).send(body);
+            if phase.load(Ordering::SeqCst) == CANCELLED {
+                return Err(cancelled());
+            }
+            sent.map_err(|e| trf!("upload {name}: {e}", "envio de {name}: {e}"))?;
+            let title = if f.title.is_empty() { name } else { f.title.as_str() };
+            done.push(serde_json::json!({ "id": id, "title": title }));
         }
+        // From here Slack posts it: too late to take back.
+        if phase.compare_exchange(UPLOADING, POSTING, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return Err(cancelled());
+        }
+        tick();
         let files = serde_json::Value::Array(done).to_string();
         let comment = escape(text);
         let mut p = vec![("files", files.as_str()), ("channel_id", chan)];
@@ -139,10 +241,10 @@ impl App {
         self.spawn(move |_| Event::Attach(Ev::Clip { to, key, res: read_clipboard() }));
     }
 
-    /// Backspace in an empty box: the last picture goes. True when one did.
+    /// Backspace in an empty box: the last file goes. True when one did.
     pub(crate) fn drop_last(&mut self, thread: bool) -> bool {
         let Some(to) = self.target(thread) else { return false };
-        let Some(key) = self.attach.of(&to).filter(|a| !a.sending).last().map(|a| a.key.clone()) else { return false };
+        let Some(key) = self.attach.of(&to).filter(|a| a.sending.is_none()).last().map(|a| a.key.clone()) else { return false };
         self.forget(&key);
         true
     }
@@ -153,36 +255,146 @@ impl App {
         self.protocols.retain(|(k, _, _), _| k != key);
     }
 
-    /// Enter with pictures attached: they go up with the text as their
+    /// Enter with files attached: they go up with the text as their
     /// comment. False when there are none, for the plain send.
     pub(crate) fn send_files(&mut self, thread: bool) -> bool {
         let Some(to) = self.target(thread) else { return false };
-        let (mut keys, mut files) = (Vec::new(), Vec::new());
-        for (_, a) in self.attach.items.iter_mut().filter(|(t, a)| *t == to && !a.sending) {
-            a.sending = true;
-            keys.push(a.key.clone());
-            files.push((a.name.clone(), a.bytes.clone()));
-        }
-        if files.is_empty() {
+        let keys: Vec<String> = self.attach.of(&to).filter(|a| a.sending.is_none()).map(|a| a.key.clone()).collect();
+        if keys.is_empty() {
             // Still going: Enter waits for them instead of sending the text alone.
             return self.attach.of(&to).next().is_some();
         }
         let text = self.editor_for(&to).map(|e| e.take().trim().to_string()).unwrap_or_default();
-        match self.thread.as_mut().filter(|_| thread) {
+        self.start_upload(to, keys, text);
+        true
+    }
+
+    /// The snippet dialog's Create: the text goes up as a file with Slack's
+    /// `snippet_type`, its card in the box while it does.
+    pub(crate) fn send_snippet(&mut self, to: Target, title: String, kind: String, content: String, comment: String) {
+        if self.attach.of(&to).count() >= MAX {
+            self.error = Some(trf!("Up to {MAX} files per message", "No máximo {MAX} arquivos por mensagem"));
+            return;
+        }
+        self.attach.next += 1;
+        let key = format!("snippet-{}-{}", std::process::id(), self.attach.next);
+        let ext = crate::snippet::ext(&kind);
+        let name = match title.as_str() {
+            "" => format!("snippet.{ext}"),
+            t if t.contains('.') => t.to_string(),
+            t => format!("{t}.{ext}"),
+        };
+        let a = Attachment {
+            key: key.clone(),
+            name,
+            bytes: Arc::new(content.into_bytes()),
+            w: 0,
+            h: 0,
+            snippet: Some((title, kind)),
+            sending: None,
+            progress: Default::default(),
+        };
+        self.attach.items.push((to.clone(), a));
+        self.start_upload(to, vec![key], comment);
+    }
+
+    /// Sends the box's files `keys`, each card following its bytes up.
+    fn start_upload(&mut self, to: Target, keys: Vec<String>, text: String) {
+        self.attach.next += 1;
+        let id = self.attach.next;
+        let mut files = Vec::new();
+        for (_, a) in self.attach.items.iter_mut().filter(|(t, a)| *t == to && keys.contains(&a.key)) {
+            a.sending = Some(id);
+            a.progress = Default::default();
+            let (title, snippet_type) = a.snippet.clone().unwrap_or_default();
+            files.push(Up { name: a.name.clone(), title, snippet_type, bytes: a.bytes.clone(), progress: a.progress.clone() });
+        }
+        match self.thread.as_mut().filter(|_| to.thread.is_some()) {
             Some(t) => t.scroll = 0,
             None => self.to_present(),
         }
-        let status = match files.len() {
-            1 => tr("Sending the image…", "Enviando a imagem…").to_string(),
-            n => trf!("Sending {n} images…", "Enviando {n} imagens…"),
+        let snippets = self.attach.of(&to).filter(|a| a.sending == Some(id) && a.snippet.is_some()).count();
+        let status = match (files.len(), snippets) {
+            (1, 1) => tr("Sending the snippet…", "Enviando o snippet…").to_string(),
+            (1, _) => tr("Sending the image…", "Enviando a imagem…").to_string(),
+            (n, 0) => trf!("Sending {n} images…", "Enviando {n} imagens…"),
+            (n, _) => trf!("Sending {n} files…", "Enviando {n} arquivos…"),
         };
         self.status = status.clone();
         self.attach.status = Some(status);
+        let phase = Arc::new(AtomicU8::new(UPLOADING));
+        self.attach.uploads.push(Upload { id, to: to.clone(), keys, text: text.clone(), phase: phase.clone() });
+        let tx = self.tx.clone();
         self.spawn(move |s| {
-            let res = s.upload(&to.chan, to.thread.as_deref(), &text, &files);
-            Event::Attach(Ev::Sent { to, keys, text, res })
+            let tick = move || {
+                let _ = tx.send(Event::Progress);
+            };
+            let res = s.upload(&to.chan, to.thread.as_deref(), &text, &files, &phase, &tick);
+            Event::Attach(Ev::Sent { id, res })
         });
+    }
+
+    /// The status line set for an upload goes with it, and its files are
+    /// no longer on their way.
+    fn end_upload(&mut self, up: &Upload) {
+        if self.attach.status.take().is_some_and(|s| s == self.status) {
+            self.status.clear();
+        }
+        for (_, a) in self.attach.items.iter_mut().filter(|(_, a)| a.sending == Some(up.id)) {
+            a.sending = None;
+        }
+    }
+
+    /// Stops an upload before Slack posts it: its files wait in the box
+    /// again and the text goes back. False when it was too late.
+    fn cancel_upload(&mut self, id: u64) -> bool {
+        let Some(i) = self.attach.uploads.iter().position(|u| u.id == id) else { return false };
+        if self.attach.uploads[i].phase.compare_exchange(UPLOADING, CANCELLED, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            self.brief(tr("Too late to cancel: Slack is posting it", "Tarde para cancelar: o Slack já está postando").into(), 3);
+            return false;
+        }
+        let up = self.attach.uploads.remove(i);
+        self.end_upload(&up);
+        self.restore(&up.to, &up.text);
+        self.brief(tr("Upload cancelled", "Envio cancelado").into(), 3);
+        self.dirty = true;
         true
+    }
+
+    /// The text of a message that didn't go, back in its box, before
+    /// whatever was typed since.
+    fn restore(&mut self, to: &Target, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let look = crate::editor::Lookup { users: &self.users, chans: &self.chans, emoji: &self.emoji, pictures: self.picker.is_some() };
+        let ed = match &to.thread {
+            None => (self.current.as_deref() == Some(to.chan.as_str())).then_some(&mut self.editor),
+            Some(ts) => self.thread.as_mut().filter(|t| t.chan == to.chan && t.ts == *ts).map(|t| &mut t.editor),
+        };
+        if let Some(ed) = ed {
+            let typed = ed.wire();
+            let all = if typed.trim().is_empty() { text.to_string() } else { format!("{text}\n{typed}") };
+            ed.load(&all, false, &look);
+        }
+    }
+
+    /// Esc in a box whose files are going up: cancels them. True when it did.
+    pub(crate) fn upload_key(&mut self, k: KeyEvent) -> bool {
+        if k.code != KeyCode::Esc || !k.modifiers.is_empty() {
+            return false;
+        }
+        let thread = match self.focus {
+            Focus::Input => false,
+            Focus::Thread => true,
+            _ => return false,
+        };
+        let Some(to) = self.target(thread) else { return false };
+        let up = self.attach.uploads.iter().rev().find(|u| u.to == to && u.phase.load(Ordering::SeqCst) == UPLOADING);
+        match up.map(|u| u.id) {
+            Some(id) => self.cancel_upload(id),
+            None => false,
+        }
     }
 
     pub(crate) fn on_attach(&mut self, ev: Ev) {
@@ -202,47 +414,40 @@ impl App {
                     Ok(Clip::Image { bytes, ext, thumb, w, h }) => {
                         self.images.insert(key.clone(), Img::Ready(thumb));
                         let name = format!("image.{ext}");
-                        self.attach.items.push((to, Attachment { key, name, bytes: Arc::new(bytes), w, h, sending: false }));
+                        let a = Attachment { key, name, bytes: Arc::new(bytes), w, h, snippet: None, sending: None, progress: Default::default() };
+                        self.attach.items.push((to, a));
                     }
                     Err(e) => self.error = Some(e),
                 }
             }
-            Ev::Sent { to, keys, text, res } => {
-                if self.attach.status.take().is_some_and(|s| s == self.status) {
-                    self.status.clear();
-                }
+            Ev::Sent { id, res } => {
+                // Cancelled: already back in the box.
+                let Some(i) = self.attach.uploads.iter().position(|u| u.id == id) else { return };
+                let up = self.attach.uploads.remove(i);
+                self.end_upload(&up);
                 match res {
                     Ok(()) => {
-                        keys.iter().for_each(|k| self.forget(k));
+                        up.keys.iter().for_each(|k| self.forget(k));
                         // The message shows once Slack has it; don't wait for the next poll.
-                        match &to.thread {
+                        match &up.to.thread {
                             Some(_) => self.refresh_thread(),
-                            None if self.current.as_deref() == Some(to.chan.as_str()) => {
-                                self.fetch(to.chan.clone(), crate::app::Fetch::Poll)
+                            None if self.current.as_deref() == Some(up.to.chan.as_str()) => {
+                                self.fetch(up.to.chan.clone(), crate::app::Fetch::Poll)
                             }
                             None => {}
                         }
                     }
                     Err(e) => {
-                        for (_, a) in self.attach.items.iter_mut().filter(|(_, a)| keys.contains(&a.key)) {
-                            a.sending = false;
-                        }
                         self.error = Some(e);
-                        let look = crate::editor::Lookup { users: &self.users, chans: &self.chans, emoji: &self.emoji, pictures: self.picker.is_some() };
-                        let ed = match &to.thread {
-                            None => (self.current.as_deref() == Some(to.chan.as_str())).then_some(&mut self.editor),
-                            Some(ts) => self.thread.as_mut().filter(|t| t.chan == to.chan && t.ts == *ts).map(|t| &mut t.editor),
-                        };
-                        if let Some(ed) = ed.filter(|e| e.is_empty()) {
-                            ed.load(&text, false, &look);
-                        }
+                        self.restore(&up.to, &up.text);
                     }
                 }
             }
+            Ev::Snippet(e) => self.on_snippet(e),
         }
     }
 
-    /// A click on a card's ✕. True when handled.
+    /// A click on a card's ✕: removes it, or cancels its upload. True when handled.
     pub(crate) fn attach_mouse(&mut self, m: crossterm::event::MouseEvent) -> bool {
         use crossterm::event::{MouseButton, MouseEventKind};
         if m.kind != MouseEventKind::Down(MouseButton::Left) {
@@ -250,7 +455,12 @@ impl App {
         }
         let at = ratatui::layout::Position::new(m.column, m.row);
         let Some(key) = self.attach.close.iter().find(|(r, _)| r.contains(at)).map(|(_, k)| k.clone()) else { return false };
-        self.forget(&key);
+        match self.attach.items.iter().find(|(_, a)| a.key == key).and_then(|(_, a)| a.sending) {
+            Some(id) => {
+                self.cancel_upload(id);
+            }
+            None => self.forget(&key),
+        }
         self.dirty = true;
         true
     }
@@ -271,23 +481,32 @@ pub fn split(app: &App, inner: Rect, thread: bool) -> (Rect, Rect) {
     (Rect { height: inner.height - h, ..inner }, Rect::new(inner.x, inner.bottom() - h, inner.width, h))
 }
 
-/// The status line's keys while a box holds pictures.
+/// The status line's keys while a box holds files.
 pub fn hint(app: &App) -> Option<String> {
     let thread = match app.focus {
         Focus::Input => false,
         Focus::Thread => true,
         _ => return None,
     };
+    let to = app.target(thread)?;
+    let phases: Vec<u8> = app.attach.uploads.iter().filter(|u| u.to == to).map(|u| u.phase.load(Ordering::SeqCst)).collect();
+    if phases.contains(&UPLOADING) {
+        return Some(tr("Uploading… · Esc or ✕ cancels", "Enviando… · Esc ou ✕ cancela").to_string());
+    }
+    if phases.contains(&POSTING) {
+        return Some(tr("Sending…", "Enviando…").to_string());
+    }
     (rows(app, thread) > 0).then(|| {
         tr(
-            "Enter send · Backspace remove last image · Ctrl+V paste another · Esc list",
-            "Enter enviar · Backspace remover última imagem · Ctrl+V colar outra · Esc lista",
+            "Enter send · Backspace remove last attachment · Ctrl+V paste another · Esc list",
+            "Enter enviar · Backspace remover último anexo · Ctrl+V colar outro · Esc lista",
         )
         .to_string()
     })
 }
 
-/// The cards in a row, each a thumbnail with a ✕ on its corner. The
+/// The cards in a row, each a thumbnail (or a snippet's first lines) with a
+/// ✕ on its corner; while sending, a progress bar under it. The
 /// conversation's box draws first and starts the frame's ✕ list.
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect, thread: bool) {
     if !thread {
@@ -297,12 +516,39 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, thread: bool) {
     if area.height < CARD_ROWS {
         return;
     }
-    let cards: Vec<(String, String, u32, u32, bool)> =
-        app.attach.of(&to).map(|a| (a.key.clone(), a.name.clone(), a.w, a.h, a.sending)).collect();
+    struct Card {
+        key: String,
+        name: String,
+        w: u32,
+        h: u32,
+        /// A snippet's title and first lines.
+        snippet: Option<(String, String)>,
+        phase: Option<u8>,
+        progress: Arc<Progress>,
+    }
+    let cards: Vec<Card> = app
+        .attach
+        .of(&to)
+        .map(|a| Card {
+            key: a.key.clone(),
+            name: a.name.clone(),
+            w: a.w,
+            h: a.h,
+            snippet: a.snippet.as_ref().map(|(t, _)| {
+                let lines = String::from_utf8_lossy(&a.bytes).lines().take(PIC_ROWS as usize - 1).collect::<Vec<_>>().join("\n");
+                (if t.is_empty() { a.name.clone() } else { t.clone() }, lines)
+            }),
+            phase: a.sending.map(|id| app.attach.phase(id).unwrap_or(POSTING)),
+            progress: a.progress.clone(),
+        })
+        .collect();
     let (fw, fh) = app.picker.as_ref().map(|p| p.font_size()).map(|s| (s.width as u64, s.height as u64)).unwrap_or((1, 2));
     let mut x = area.x;
-    for (i, (key, name, w, h, sending)) in cards.iter().enumerate() {
-        let cols = (*w as u64 * fh * PIC_ROWS as u64 / ((*h).max(1) as u64 * fw.max(1))).clamp(6, 28) as u16;
+    for (i, c) in cards.iter().enumerate() {
+        let cols = match c.snippet {
+            Some(_) => SNIPPET_COLS,
+            None => (c.w as u64 * fh * PIC_ROWS as u64 / (c.h.max(1) as u64 * fw.max(1))).clamp(6, 28) as u16,
+        };
         let card = Rect::new(x, area.y, cols + 2, CARD_ROWS);
         if card.right() > area.right() {
             let more = format!("+{}", cards.len() - i);
@@ -312,20 +558,35 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, thread: bool) {
             break;
         }
         let mut block = Block::bordered().border_type(BorderType::Rounded).border_style(dim());
-        if *sending {
-            block = block.title_bottom(Line::from(tr(" sending… ", " enviando… ")).style(dim().italic()));
+        match c.phase {
+            Some(UPLOADING) => {
+                let label = c.progress.label();
+                let cells = (cols as usize).saturating_sub(label.width() + 3).max(1);
+                let progress = format!(" {} {label} ", bar(c.progress.fraction().unwrap_or(0.0), cells));
+                block = block.title_bottom(Line::from(progress).style(Style::new().fg(ratatui::style::Color::Cyan)));
+            }
+            Some(_) => block = block.title_bottom(Line::from(tr(" Sending… ", " Enviando… ")).style(dim().italic())),
+            None => {}
         }
         let pic = block.inner(card);
         f.render_widget(block, card);
-        if app.picker.is_some() {
-            draw_image(f, app, &ImgRef { key: key.clone(), url: String::new(), name: String::new(), link: None }, pic);
-        } else {
-            f.render_widget(Paragraph::new(format!("🖼 {name}")).style(dim()), pic);
+        match &c.snippet {
+            Some((title, lines)) => {
+                let w = pic.width as usize;
+                let mut text = vec![Line::from(truncate(title, w)).style(Style::new().bold())];
+                text.extend(lines.lines().map(|l| Line::from(truncate(&l.replace('\t', "  "), w)).style(dim())));
+                f.render_widget(Paragraph::new(text), pic);
+            }
+            None if app.picker.is_some() => {
+                draw_image(f, app, &ImgRef { key: c.key.clone(), url: String::new(), name: String::new(), link: None }, pic);
+            }
+            None => f.render_widget(Paragraph::new(format!("🖼 {}", c.name)).style(dim()), pic),
         }
-        if !*sending {
+        // Until Slack posts it, the ✕ takes it out, or stops its upload.
+        if matches!(c.phase, None | Some(UPLOADING)) {
             let close = Rect::new(card.right() - 4, card.y, 3, 1);
             f.render_widget(Paragraph::new(" ✕ ").style(Style::new().bold()), close);
-            app.attach.close.push((close, key.clone()));
+            app.attach.close.push((close, c.key.clone()));
         }
         x = card.right() + 1;
     }

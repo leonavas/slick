@@ -30,6 +30,8 @@ const LABEL_W: usize = 13;
 pub enum Dialog {
     Message(NewMessage),
     Channel(NewChannel),
+    /// Ctrl+Shift+Enter in a message box (`snippet`).
+    Snippet(Box<crate::snippet::Dialog>),
 }
 
 #[derive(Default)]
@@ -188,6 +190,7 @@ impl App {
                     t.push_str(line);
                 }
             }
+            Some(Dialog::Snippet(_)) => self.snippet_paste(s),
             _ => {}
         }
     }
@@ -201,6 +204,7 @@ impl App {
         match self.dialog {
             Some(Dialog::Message(_)) => self.message_key(k, ctrl),
             Some(Dialog::Channel(_)) => self.channel_key(k, ctrl),
+            Some(Dialog::Snippet(_)) => self.snippet_dialog_key(k, ctrl),
             None => {}
         }
     }
@@ -336,7 +340,7 @@ impl App {
                 match self.dialog.as_mut() {
                     Some(Dialog::Message(m)) => (m.busy, m.error) = (false, Some(text)),
                     Some(Dialog::Channel(c)) => (c.busy, c.error) = (false, Some(text)),
-                    None => self.error = Some(text),
+                    Some(Dialog::Snippet(_)) | None => self.error = Some(text),
                 }
                 return;
             }
@@ -346,7 +350,8 @@ impl App {
         if let Some(w) = warning {
             self.error = Some(trf!("channel created, but the description wasn't saved: {w}", "canal criado, mas a descrição não foi salva: {w}"));
         }
-        if self.dialog.take().is_some() {
+        if matches!(self.dialog, Some(Dialog::Message(_) | Dialog::Channel(_))) {
+            self.dialog = None;
             self.open(id);
         }
         self.dirty = true;
@@ -432,6 +437,7 @@ impl App {
                     d.error = None;
                 }
             }
+            (_, Some(Dialog::Snippet(_))) => self.snippet_dialog_mouse(m, field, confirm),
             (MouseEventKind::Down(MouseButton::Left), Some(Dialog::Channel(c))) if !c.busy => {
                 if confirm {
                     self.submit_channel();
@@ -477,12 +483,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match app.dialog {
         Some(Dialog::Message(_)) => draw_message(f, app),
         Some(Dialog::Channel(_)) => draw_channel(f, app),
+        Some(Dialog::Snippet(_)) => crate::snippet::draw(f, app),
         None => {}
     }
 }
 
 /// A centred, bordered box like the image viewer's; returns its inside.
-fn frame(f: &mut Frame, app: &mut App, title: &str, w: u16, h: u16) -> Rect {
+pub(crate) fn frame(f: &mut Frame, app: &mut App, title: &str, w: u16, h: u16) -> Rect {
     let area = f.area();
     let (w, h) = (w.min(area.width), h.min(area.height));
     let rect = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
@@ -495,7 +502,7 @@ fn frame(f: &mut Frame, app: &mut App, title: &str, w: u16, h: u16) -> Rect {
 }
 
 /// The bottom two rows: the error, then the hint and the button on the right.
-fn footer(f: &mut Frame, app: &mut App, inner: Rect, error: Option<&str>, hint: &str, button: &str, ready: bool) {
+pub(crate) fn footer(f: &mut Frame, app: &mut App, inner: Rect, error: Option<&str>, hint: &str, button: &str, ready: bool) {
     let y = inner.bottom().saturating_sub(2);
     if let Some(e) = error {
         f.render_widget(Paragraph::new(truncate(e, inner.width as usize)).style(Style::new().fg(Color::Yellow)), Rect::new(inner.x, y, inner.width, 1));

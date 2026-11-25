@@ -46,6 +46,11 @@ screen (from a local cache) and refreshes in the background.
 - Custom workspace emoji, animated ones included (played at the GIF's own pace).
 - Inline images (kitty graphics, sixel, iTerm2, or half-blocks as a fallback),
   an image viewer, and opening or downloading shared files.
+- Text snippets as Slack draws them (title, type, numbered lines, "Show more"
+  for the whole text, copy), and a snippet dialog in the message box
+  (`Ctrl+Shift+Enter`, or `Alt+S`): title, type, content and a message.
+- Uploads you can watch: a progress bar on each attachment, then "Sending…";
+  `Esc` or the card's ✕ cancels it midway and puts the text back in the box.
 - Block Kit and attachments rendered the way Slack draws them, with clickable buttons.
 - Apps' messages with their name and picture; a click opens the app's profile.
 - Message actions: edit, delete, forward, save for later, remind me, mark as

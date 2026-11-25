@@ -132,6 +132,8 @@ pub enum Event {
     Section(crate::section::Ev),
     /// An app whose messages came without its name or picture (`request_names`).
     Bot { id: String, res: Res<(String, String)> },
+    /// A file a message announced half-told, whole (`request_files`).
+    FileInfo(Res<crate::slack::File>),
     /// An app's profile, opened from its message: its bot user and that user's profile.
     AppProfile { bot: String, res: Res<(String, Profile)> },
     /// A channel a message mentioned, looked up (`request_names`).
@@ -1893,6 +1895,7 @@ impl App {
     pub fn request_names(&mut self) {
         use crate::blocks::Target;
         self.request_bots();
+        self.request_files();
         for t in std::mem::take(&mut self.unnamed) {
             let (id, person) = match t {
                 Target::User(id) if !self.users.names.is_empty() => (id, true),
@@ -1934,6 +1937,42 @@ impl App {
         for id in ask {
             self.spawn(move |s| Event::Bot { res: s.bot(&id), id });
         }
+    }
+
+    /// Files on screen announced half-told (a phone's upload): `files.info`
+    /// for the rest, once each, asked again a few times while Slack is still
+    /// on it.
+    fn request_files(&mut self) {
+        let thread = self.thread.as_ref().map(|t| t.msgs.as_slice()).unwrap_or_default();
+        let open = self.current.as_ref().and_then(|c| self.messages.get(c)).map(Vec::as_slice).unwrap_or_default();
+        let ask: Vec<String> = open.iter().chain(thread).flat_map(|m| &m.files).filter(|f| f.stub && !f.id.is_empty()).map(|f| f.id.clone()).collect();
+        for id in ask {
+            if !self.asked.insert(format!("file:{id}")) {
+                continue;
+            }
+            self.spawn(move |s| {
+                let mut res = s.file_info(&id);
+                for n in 1..=4 {
+                    if res.as_ref().is_ok_and(|f| !f.stub) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(3 * n));
+                    res = s.file_info(&id);
+                }
+                Event::FileInfo(res)
+            });
+        }
+    }
+
+    /// A file whole: in place of its half-told self, wherever it was.
+    fn file_info(&mut self, f: crate::slack::File) {
+        let thread = self.thread.iter_mut().flat_map(|t| t.msgs.iter_mut());
+        for old in self.messages.values_mut().flatten().chain(thread).flat_map(|m| m.files.iter_mut()) {
+            if old.id == f.id {
+                *old = f.clone();
+            }
+        }
+        self.dirty = true;
     }
 
     /// A mentioned channel looked up: named from now on, and a public one
@@ -2880,6 +2919,8 @@ impl App {
             }
             // The messages keep "bot", and no asking again.
             Event::Bot { res: Err(_), .. } => {}
+            Event::FileInfo(Ok(f)) => self.file_info(f),
+            Event::FileInfo(Err(_)) => {}
             Event::Dm(res) => self.dm_opened(res),
             Event::Slash(e) => self.on_slash(e),
             Event::Details(e) => self.on_details(e),

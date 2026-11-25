@@ -344,6 +344,10 @@ pub struct File {
     pub pretty_type: String,
     #[serde(default)]
     pub mimetype: String,
+    /// Announced half-told (a phone's upload, before Slack has looked at
+    /// it): no name, type or links. `files.info` has the rest.
+    #[serde(default)]
+    pub stub: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -755,6 +759,12 @@ impl Slack {
     }
 
     /// An app's name and picture, for its messages that don't carry them.
+    /// A file whole (`files.info`), for one a message announced half-told.
+    pub fn file_info(&self, id: &str) -> Res<File> {
+        let v = self.call("files.info", &[("file", id)])?;
+        Ok(parse_file(&v["file"]))
+    }
+
     pub fn bot(&self, id: &str) -> Res<(String, String)> {
         let v = self.call("bots.info", &[("bot", id)])?;
         let b = &v["bot"];
@@ -1389,6 +1399,11 @@ pub(crate) fn parse_file(f: &Value) -> File {
         filetype: str_of(&f["filetype"]),
         pretty_type: str_of(&f["pretty_type"]),
         mimetype: str_of(&f["mimetype"]),
+        stub: f["file_access"] == "check_file_info"
+            || (f["is_external"].as_bool() != Some(true)
+                && !matches!(f["mode"].as_str(), Some("snippet" | "post" | "tombstone" | "hidden_by_limit"))
+                && f["mimetype"].as_str().unwrap_or("").is_empty()
+                && f["filetype"].as_str().unwrap_or("").is_empty()),
     }
 }
 

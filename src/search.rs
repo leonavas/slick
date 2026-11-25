@@ -666,8 +666,10 @@ impl App {
     /// The channels the query matches (ours and the workspace's), and the
     /// people: anyone by any of their names (display, full, handle), a DM
     /// or not, with group DMs and apps' DMs among them. The better match
-    /// leads, then the last message; you go behind the others, and
-    /// deactivated accounts behind everyone still here.
+    /// leads, then the last message; you go first when your display or
+    /// full name starts with what's typed (even ahead of someone named
+    /// exactly that), ahead of the others on a tie, and deactivated
+    /// accounts behind everyone still here.
     fn local_matches(&self, query: &str) -> Matches {
         use crate::text::{place, rank, Folded, Query};
         let chans: Vec<Conv> = self
@@ -686,8 +688,9 @@ impl App {
         let dm_of: HashMap<&str, usize> =
             self.convs.iter().enumerate().filter(|(_, c)| c.kind == Kind::Direct).filter_map(|(i, c)| Some((c.user.as_deref()?, i))).collect();
         let mut ranges = Vec::new();
-        // (deactivated, archived, inexact, you, place): fields compare in order.
-        let mut hits: Vec<((bool, bool, bool, bool, crate::text::Place), Who)> = Vec::new();
+        // (deactivated, archived, not you by your name's start, inexact, not
+        // you, place): fields compare in order.
+        let mut hits: Vec<((bool, bool, bool, bool, bool, crate::text::Place), Who)> = Vec::new();
         let mut covered: HashSet<&str> = HashSet::new();
         for (uid, name) in &users.names {
             if users.bots.contains(uid) {
@@ -699,8 +702,12 @@ impl App {
             };
             covered.insert(uid);
             let you = me == Some(uid.as_str());
+            // You first when your display or full name starts with what's typed.
+            let you_first = you
+                && names[..2].iter().flatten().filter(|n| !n.is_empty()).any(|n| rank(&q, &Folded::new(n), &mut ranges).is_some_and(|t| t <= 1));
             let latest = if you { 0 } else { dm_of.get(uid.as_str()).map_or(0, |&i| self.last_message(&self.convs[i])) };
-            hits.push(((users.deleted.contains(uid), false, tier > 0, you, place(tier, false, true, latest, 0, name.chars().count())), Who::Person(uid.clone())));
+            let key = (users.deleted.contains(uid), false, !you_first, tier > 0, !you, place(tier, false, true, latest, 0, name.chars().count()));
+            hits.push((key, Who::Person(uid.clone())));
         }
         for (i, c) in self.convs.iter().enumerate() {
             let group = c.kind == Kind::Group;
@@ -711,18 +718,17 @@ impl App {
             let Some(tier) = rank(&q, &name, &mut ranges) else { continue };
             let at = place(tier, c.archived, true, self.last_message(c), 0, name.len()).group(group);
             let gone = c.user.as_ref().is_some_and(|u| users.deleted.contains(u));
-            hits.push(((gone, c.archived, tier > 0, false, at), Who::Conv(Conv::Ours(i))));
+            hits.push(((gone, c.archived, true, tier > 0, true, at), Who::Conv(Conv::Ours(i))));
         }
         hits.sort_by(|a, b| a.0.cmp(&b.0));
         // All: the part whose first answer is the better match goes first;
-        // People on a tie, unless what leads it is you.
+        // People on a tie.
         let lead_c = chans.first().and_then(|c| self.conv_of(*c)).map_or((true, true), |c| {
             let exact = crate::text::find(&self.label(&c), query).is_some_and(|(t, _)| t == 0);
             (c.archived, !exact)
         });
-        let lead_p = hits.first().map_or((true, true), |h| (h.0 .0 || h.0 .1, h.0 .2));
-        let you_lead = hits.first().is_some_and(|h| h.0 .3);
-        let people_first = lead_p < lead_c || (lead_p == lead_c && !you_lead);
+        let lead_p = hits.first().map_or((true, true), |h| (h.0 .0 || h.0 .1, h.0 .3));
+        let people_first = lead_p <= lead_c;
         Matches { recent: Vec::new(), chans, people: hits.into_iter().map(|(_, w)| w).collect(), people_first }
     }
 

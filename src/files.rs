@@ -117,6 +117,8 @@ pub enum Click {
     Reveal(PathBuf),
     /// The card itself: a menu with what can be done with the file.
     Menu(Option<Job>, Option<PathBuf>),
+    /// A snippet's Show more / Show less, or Copy (`snippet`).
+    Snippet(crate::snippet::Act),
 }
 
 /// A clickable stretch of a card line, in message-list coordinates.
@@ -332,7 +334,7 @@ pub fn size_label(n: u64) -> String {
 }
 
 /// A Nerd Font file glyph (one cell) and its color, by type.
-fn icon(f: &File) -> (&'static str, Color) {
+pub fn icon(f: &File) -> (&'static str, Color) {
     let (t, m) = (f.filetype.as_str(), f.mimetype.as_str());
     match t {
         "pdf" => ("\u{f1c1}", Color::Red),
@@ -380,34 +382,61 @@ pub fn card(f: &File, state: Option<&State>, indent: &str, width: usize, line: u
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" · ");
-    let dim = Style::new().fg(Color::DarkGray);
-    let link = Style::new().fg(Color::Cyan);
-    let mut spans = vec![Span::raw(format!("{indent}   ")), Span::styled(meta, dim)];
-    let mut x = spans.iter().map(|s| s.content.width()).sum::<usize>();
-    let mut action = |spans: &mut Vec<Span<'static>>, gap: &str, label: &str, style: Style, click: Option<Click>| {
-        spans.push(Span::styled(gap.to_string(), dim));
-        x += gap.width();
-        if let Some(click) = click {
-            hits.push(Hit { line: line + 1, x: x as u16, w: label.width() as u16, click });
-        }
-        spans.push(Span::styled(label.to_string(), style));
-        x += label.width();
-    };
-    match (state, Job::file(f)) {
-        (Some(State::Saving(p)), _) => {
-            action(&mut spans, "   ", tr("Downloading", "Baixando"), dim.italic(), None);
-            if let Some(f) = p.fraction() {
-                action(&mut spans, " ", &bar(f, 10), Style::new().fg(Color::Cyan), None);
-            }
-            action(&mut spans, " ", &p.label(), dim, None);
-        }
-        (Some(State::Saved(p)), _) => {
-            action(&mut spans, "   ", tr("✓ Downloaded", "✓ Baixado"), Style::new().fg(Color::Green), None);
-            action(&mut spans, "  ", tr("Open", "Abrir"), link, Some(Click::Open(p.clone())));
-            action(&mut spans, " · ", tr("Show in folder", "Mostrar na pasta"), link, Some(Click::Reveal(p.clone())));
-        }
-        (None, Some(job)) => action(&mut spans, "   ", tr("⤓ Download", "⤓ Baixar"), link, Some(Click::Save(job))),
-        (None, None) => {}
-    }
+    let mut row = Actions::new(vec![Span::raw(format!("{indent}   ")), Span::styled(meta, DIM)], line + 1, &mut hits);
+    row.download(f, state, "   ");
+    let spans = row.spans;
     (vec![name, Line::from(spans)], hits)
+}
+
+const DIM: Style = Style::new().fg(Color::DarkGray);
+const LINK: Style = Style::new().fg(Color::Cyan);
+
+/// A line of a file's actions, each clickable stretch kept in `hits`.
+pub struct Actions<'a> {
+    pub spans: Vec<Span<'static>>,
+    x: usize,
+    line: usize,
+    hits: &'a mut Vec<Hit>,
+}
+
+impl<'a> Actions<'a> {
+    pub fn new(spans: Vec<Span<'static>>, line: usize, hits: &'a mut Vec<Hit>) -> Self {
+        let x = spans.iter().map(|s| s.content.width()).sum::<usize>();
+        Self { spans, x, line, hits }
+    }
+
+    /// `label` after `gap`, a link when it has a click.
+    pub fn push(&mut self, gap: &str, label: &str, style: Style, click: Option<Click>) {
+        self.spans.push(Span::styled(gap.to_string(), DIM));
+        self.x += gap.width();
+        if let Some(click) = click {
+            self.hits.push(Hit { line: self.line, x: self.x as u16, w: label.width() as u16, click });
+        }
+        self.spans.push(Span::styled(label.to_string(), style));
+        self.x += label.width();
+    }
+
+    pub fn link(&mut self, gap: &str, label: &str, click: Click) {
+        self.push(gap, label, LINK, Some(click));
+    }
+
+    /// Download, how far it got, or Open / Show in folder once saved.
+    pub fn download(&mut self, f: &File, state: Option<&State>, gap: &str) {
+        match (state, Job::file(f)) {
+            (Some(State::Saving(p)), _) => {
+                self.push(gap, tr("Downloading", "Baixando"), DIM.italic(), None);
+                if let Some(f) = p.fraction() {
+                    self.push(" ", &bar(f, 10), Style::new().fg(Color::Cyan), None);
+                }
+                self.push(" ", &p.label(), DIM, None);
+            }
+            (Some(State::Saved(p)), _) => {
+                self.push(gap, tr("✓ Downloaded", "✓ Baixado"), Style::new().fg(Color::Green), None);
+                self.link("  ", tr("Open", "Abrir"), Click::Open(p.clone()));
+                self.link(" · ", tr("Show in folder", "Mostrar na pasta"), Click::Reveal(p.clone()));
+            }
+            (None, Some(job)) => self.link(gap, tr("⤓ Download", "⤓ Baixar"), Click::Save(job)),
+            (None, None) => {}
+        }
+    }
 }

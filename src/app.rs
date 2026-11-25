@@ -529,7 +529,7 @@ impl NewLine {
 
 pub struct App {
     pub(crate) slack: Slack,
-    tx: Sender<Event>,
+    pub(crate) tx: Sender<Event>,
     pub me: Option<AuthInfo>,
     pub users: Users,
     pub chans: HashMap<String, String>,
@@ -2652,6 +2652,7 @@ impl App {
             }
             files::Click::Open(path) => self.open_url(&path.to_string_lossy()),
             files::Click::Reveal(path) => files::reveal(&path),
+            files::Click::Snippet(act) => self.snippet_click(act),
         }
         self.dirty = true;
     }
@@ -3863,13 +3864,13 @@ impl App {
         if k.code == KeyCode::Esc && self.selection.take().is_some_and(|s| s.moved) {
             return;
         }
-        if self.format_key(k) {
+        if self.format_key(k) || self.snippet_key(k) {
             return;
         }
         if self.emoji_key(k) || self.mention_key(k) || self.slash_key(k) {
             return;
         }
-        if self.edit_key(k) {
+        if self.edit_key(k) || self.upload_key(k) {
             return;
         }
         if self.profile.is_some() && k.code == KeyCode::Esc {

@@ -39,6 +39,7 @@ mod section;
 mod selection;
 mod slack;
 mod slash;
+mod snippet;
 mod switcher;
 mod text;
 mod thread;

@@ -2444,7 +2444,11 @@ fn lines_with(
             }
         }
         for file in m.files.iter().filter(|f| f.thumb.is_none()) {
-            let (card, h) = files::card(file, app.downloads.get(&file.id), &indent, body_width, lines.len());
+            let (card, h) = if crate::snippet::is_snippet(file) {
+                crate::snippet::view(file, &app.attach.snippets, app.downloads.get(&file.id), &indent, body_width, lines.len())
+            } else {
+                files::card(file, app.downloads.get(&file.id), &indent, body_width, lines.len())
+            };
             lines.extend(card);
             file_hits.extend(h);
         }

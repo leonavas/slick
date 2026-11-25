@@ -118,6 +118,8 @@ const GROUPS: &[Group] = &[
             ("Ctrl+← · Ctrl+→", "Move by word", "Mover por palavra"),
             ("Ctrl+Delete", "Delete the next word", "Apagar a próxima palavra"),
             ("Ctrl+V", "Paste, pictures included", "Colar, imagens também"),
+            ("Ctrl+Shift+Enter · Alt+S", "Create a text snippet", "Criar um snippet de texto"),
+            ("Esc · ✕", "While files upload: cancel, the text back in the box", "Durante o envio de arquivos: cancelar, o texto volta à caixa"),
             ("Ctrl+End · End", "Jump to the latest (End only in an empty box)", "Ir às mais recentes (End só com a caixa vazia)"),
             ("↑", "Empty box: pick a message", "Caixa vazia: escolher uma mensagem"),
             ("Backspace", "Empty box: remove the last attachment", "Caixa vazia: remover o último anexo"),

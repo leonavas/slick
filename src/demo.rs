@@ -13,6 +13,10 @@
 //! - `click:col,row`, `rclick:col,row`, `move:col,row`, `wheel-up:col,row`, `wheel-down:col,row`
 //! - `ready` writes `$SLICK_DEMO_DIR/ready`, for whoever takes the screenshot
 //! - `live:message` / `live:reaction` play something happening in the workspace
+//!
+//! `blocks.actions`, `chat.attachmentAction`, the file and upload calls and
+//! `users.profile.set` are written with their parameters to
+//! `$SLICK_DEMO_DIR/api.log`; Ctrl+V pastes a picture of the demo's own.
 
 use crate::app::Event;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -88,8 +92,18 @@ static PICS: &[(&str, &[u8])] = pics![
 /// A picture by its address; the demo has no others.
 pub fn download(url: &str) -> Result<Vec<u8>, String> {
     let name = url.strip_prefix(HOST).unwrap_or(url);
+    if name == "worker-pool.yaml" {
+        log("download", &[("url", url)]);
+        return Ok(POOL_YAML.as_bytes().to_vec());
+    }
+    if let Some(id) = name.strip_prefix("up/") {
+        return uploads().get(id).map(|u| u.bytes.clone()).ok_or_else(|| format!("demo: no {name}"));
+    }
     PICS.iter().find(|(n, _)| *n == name).map(|(_, b)| b.to_vec()).ok_or_else(|| format!("demo: no {name}"))
 }
+
+/// The snippet in #incidents, whole: what "Show more" fetches.
+const POOL_YAML: &str = "workers:\n  pool:\n    size: 64\n    max_overflow: 32\n    idle_timeout: 0s   # the leak: never closed\n    recycle: 30m\n  queues:\n    - name: default\n      concurrency: 16\n    - name: emails\n      concurrency: 4\n  retry:\n    attempts: 5\n    backoff: exponential\n";
 
 fn pic(name: &str) -> String {
     format!("{HOST}{name}")
@@ -358,6 +372,73 @@ fn acme(c: &Clock) -> Space {
         json!({ "user": "U0PRIYA", "ts": t(86400 * 3), "text": "Team dinner on Friday?" }),
         json!({ "user": "U0DIEGO", "ts": t(86400 * 3 - 60), "text": "I'm in :ramen:" }),
     ]);
+    // An app's go/no-go card in #launch-q4: buttons (one asks first), menus,
+    // pickers, checkboxes, radio buttons, a table, Markdown and a form field.
+    let launch = history.get_mut("C0LAUNCH").expect("launch");
+    launch.push(json!({ "user": "U0SHIP", "bot_id": "B0SHIP", "ts": t(2000), "text": "Go/no-go: onboarding v2", "blocks": [
+        { "type": "section", "block_id": "gng", "text": { "type": "mrkdwn", "text": "*Go/no-go: onboarding v2*\nThe flag `onboarding_v2` is ready for production." },
+          "accessory": { "type": "overflow", "action_id": "more", "options": [
+              { "text": { "type": "plain_text", "text": "Snooze for an hour" }, "value": "snooze" },
+              { "text": { "type": "plain_text", "text": "Mute this launch" }, "value": "mute" },
+              { "text": { "type": "plain_text", "text": "Copy the flag name" }, "value": "copy" }] } },
+        { "type": "section", "block_id": "env", "text": { "type": "mrkdwn", "text": "*Environment*" },
+          "accessory": { "type": "static_select", "action_id": "env", "placeholder": { "type": "plain_text", "text": "Choose one" }, "options": [
+              { "text": { "type": "plain_text", "text": "Staging" }, "value": "staging" },
+              { "text": { "type": "plain_text", "text": "Canary (5%)" }, "value": "canary" },
+              { "text": { "type": "plain_text", "text": "Production" }, "value": "production" }] } },
+        { "type": "section", "block_id": "owner", "text": { "type": "mrkdwn", "text": "*Launch owner*" },
+          "accessory": { "type": "users_select", "action_id": "owner", "placeholder": { "type": "plain_text", "text": "Pick someone" } } },
+        { "type": "section", "block_id": "day", "text": { "type": "mrkdwn", "text": "*Launch day*" },
+          "accessory": { "type": "datepicker", "action_id": "day", "initial_date": "2026-12-08" } },
+        { "type": "actions", "block_id": "decide", "elements": [
+            { "type": "button", "action_id": "go", "text": { "type": "plain_text", "text": "Go :rocket:" }, "style": "primary", "value": "go" },
+            { "type": "button", "action_id": "rollback", "text": { "type": "plain_text", "text": "Roll back" }, "style": "danger", "value": "rollback",
+              "confirm": { "title": { "type": "plain_text", "text": "Roll back onboarding v2?" },
+                           "text": { "type": "mrkdwn", "text": "This turns `onboarding_v2` off for everyone, right away." },
+                           "confirm": { "type": "plain_text", "text": "Roll back" }, "deny": { "type": "plain_text", "text": "Keep it" }, "style": "danger" } },
+            { "type": "button", "action_id": "later", "text": { "type": "plain_text", "text": "Ask me tomorrow" }, "value": "later" }] },
+        { "type": "context", "elements": [
+            { "type": "image", "image_url": pic("face-noah.png"), "alt_text": "Noah" },
+            { "type": "image", "image_url": pic("face-hana.png"), "alt_text": "Hana" },
+            { "type": "mrkdwn", "text": "Noah and Hana signed off · checks green" }] }
+    ] }));
+    launch.push(json!({ "user": "U0SHIP", "bot_id": "B0SHIP", "ts": t(1500), "text": "Launch checklist", "blocks": [
+        { "type": "markdown", "text": "## Launch checklist\nThe **last deploy window** is Thursday. See the [runbook](https://acme.example/runbook).\n- [x] Copy reviewed\n- [ ] Load test at 2x" },
+        { "type": "section", "block_id": "checks", "text": { "type": "mrkdwn", "text": "*Before the switch*" },
+          "accessory": { "type": "checkboxes", "action_id": "checks", "initial_options": [{ "text": { "type": "plain_text", "text": "QA signed off" }, "value": "qa" }], "options": [
+              { "text": { "type": "plain_text", "text": "QA signed off" }, "value": "qa" },
+              { "text": { "type": "plain_text", "text": "Docs updated" }, "value": "docs" },
+              { "text": { "type": "plain_text", "text": "Support briefed" }, "value": "support", "description": { "type": "plain_text", "text": "Macros for the new screens" } }] } },
+        { "type": "section", "block_id": "rollout", "text": { "type": "mrkdwn", "text": "*Rollout*" },
+          "accessory": { "type": "radio_buttons", "action_id": "rollout", "initial_option": { "text": { "type": "plain_text", "text": "10% of sign-ups" }, "value": "10" }, "options": [
+              { "text": { "type": "plain_text", "text": "10% of sign-ups" }, "value": "10" },
+              { "text": { "type": "plain_text", "text": "50% of sign-ups" }, "value": "50" },
+              { "text": { "type": "plain_text", "text": "Everyone" }, "value": "100" }] } },
+        { "type": "table", "rows": [
+            [{ "type": "raw_text", "text": "Step" }, { "type": "raw_text", "text": "Owner" }, { "type": "raw_text", "text": "Status" }],
+            [{ "type": "raw_text", "text": "Feature flag" }, { "type": "raw_text", "text": "Noah" }, { "type": "raw_text", "text": "Done :white_check_mark:" }],
+            [{ "type": "raw_text", "text": "Load test" }, { "type": "raw_text", "text": "Tomás" }, { "type": "raw_text", "text": "Thursday" }],
+            [{ "type": "raw_text", "text": "Release notes" }, { "type": "raw_text", "text": "Priya" }, { "type": "raw_text", "text": "In review" }]] },
+        { "type": "input", "block_id": "notes", "optional": true, "label": { "type": "plain_text", "text": "Notes for support" },
+          "element": { "type": "plain_text_input", "action_id": "notes", "placeholder": { "type": "plain_text", "text": "Anything they should know?" } },
+          "hint": { "type": "plain_text", "text": "Shared in #releases on launch day" } }
+    ] }));
+    // #incidents: an alert with legacy attachment buttons, and a snippet.
+    let incidents = history.get_mut("C0INCIDENTS").expect("incidents");
+    incidents.push(json!({ "user": "U0TOMAS", "ts": t(86400 * 2), "text": "The pool settings that leaked, for the postmortem:",
+                           "files": [{ "id": "F0POOL", "mode": "snippet", "name": "worker-pool.yaml", "title": "worker-pool.yaml", "filetype": "yaml", "pretty_type": "YAML",
+                                       "mimetype": "text/plain", "size": POOL_YAML.len(), "user": "U0TOMAS", "lines": POOL_YAML.lines().count(),
+                                       "lines_more": POOL_YAML.lines().count() - 5, "preview": POOL_YAML.lines().take(5).collect::<Vec<_>>().join("\n"),
+                                       "url_private": pic("worker-pool.yaml"), "url_private_download": pic("worker-pool.yaml"),
+                                       "permalink": "https://acme.slack.com/files/U0TOMAS/F0POOL/worker-pool.yaml" }] }));
+    incidents.push(json!({ "user": "U0WATCH", "bot_id": "B0WATCH", "ts": t(3600), "text": "",
+                           "attachments": [{ "id": 1, "callback_id": "inc_213", "color": "warning", "title": "INC-213 · Queue depth above 10k on workers",
+                                             "text": "Opened by Watchtower. Nobody has it yet.", "footer": "Watchtower",
+                                             "actions": [{ "id": "1", "name": "ack", "text": "Acknowledge", "type": "button", "value": "INC-213" },
+                                                         { "id": "2", "name": "escalate", "text": "Escalate", "type": "button", "style": "danger", "value": "INC-213" }] }] }));
+    // #design: a phone's upload, announced half-told until files.info.
+    history.get_mut("C0DESIGN").expect("design").push(json!({ "user": "U0HANA", "ts": t(86400 * 4), "text": "Heatmap from today's usability session :camera:",
+        "files": [{ "id": "F0PHONE", "file_access": "check_file_info", "created": c.0 - 86400 * 4, "user": "U0HANA" }] }));
 
     let mut replies = HashMap::new();
     replies.insert(format!("C0GENERAL/{brand}"), vec![
@@ -529,6 +610,13 @@ fn highlight(text: &str, words: &[String]) -> String {
 
 /// The answer to a Web API call, as Slack would give it.
 pub fn call(token: &str, method: &str, params: &[(&str, &str)]) -> Result<Value, String> {
+    if LOGGED.contains(&method) {
+        log(method, params);
+    }
+    // Slack takes a moment to post the files: the cards say "Sending…" meanwhile.
+    if method == "files.completeUploadExternal" {
+        std::thread::sleep(Duration::from_millis(1500));
+    }
     let v = with(token, |d| answer(d, method, params));
     if v["ok"].as_bool() == Some(true) {
         Ok(v)
@@ -860,12 +948,127 @@ fn answer(d: &mut Space, method: &str, params: &[(&str, &str)]) -> Value {
             }
             json!({ "ok": true })
         }
+        // An app hears the click; it would answer by changing the message.
+        "blocks.actions" | "chat.attachmentAction" => json!({ "ok": true }),
+        "files.info" => file_info(p("file")),
+        "files.getUploadURLExternal" => {
+            let id = format!("F0UP{}", rand_us());
+            let up = Upload { name: p("filename").into(), kind: p("snippet_type").into(), bytes: Vec::new() };
+            uploads().insert(id.clone(), up);
+            json!({ "ok": true, "upload_url": format!("https://files.slack.com/upload/v1/demo-{id}"), "file_id": id })
+        }
+        "files.completeUploadExternal" => {
+            let list: Vec<Value> = serde_json::from_str(p("files")).unwrap_or_default();
+            let files: Vec<Value> = list.iter().map(|f| uploaded(f["id"].as_str().unwrap_or(""), f["title"].as_str().unwrap_or(""))).collect();
+            let ts = stamp();
+            let mut m = json!({ "user": ME, "ts": ts, "text": p("initial_comment"), "files": files });
+            let (chan, thread) = (p("channel_id").to_string(), p("thread_ts").to_string());
+            if thread.is_empty() {
+                d.history.entry(chan).or_default().push(m);
+            } else {
+                m["thread_ts"] = json!(thread);
+                d.replies.entry(format!("{chan}/{thread}")).or_default().push(m);
+            }
+            json!({ "ok": true, "files": files })
+        }
         // No socket: `rtm` pretends one is up.
         "client.getWebSocketURL" | "rtm.connect" => json!({ "ok": false, "error": "demo" }),
         "admin.roles.entity.listAssignments" => json!({ "ok": true, "role_assignments": [{ "role_id": "Rl0A", "users": ["U0SAM"] }] }),
         "apps.profile.get" => json!({ "ok": false, "error": "demo" }),
         _ => json!({ "ok": true }),
     }
+}
+
+/// The calls whose parameters go to `$SLICK_DEMO_DIR/api.log`, to see what an app or Slack was told.
+const LOGGED: &[&str] = &["blocks.actions", "chat.attachmentAction", "files.info", "files.getUploadURLExternal", "files.completeUploadExternal", "users.profile.set"];
+
+/// A line of `api.log`: the time, the method and its parameters as JSON.
+fn log(method: &str, params: &[(&str, &str)]) {
+    use std::io::Write;
+    let args: serde_json::Map<String, Value> = params.iter().map(|(k, v)| (k.to_string(), json!(v))).collect();
+    let line = json!({ "at": chrono::Local::now().format("%H:%M:%S%.3f").to_string(), "method": method, "params": args });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir().join("api.log")) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// A file on its way up: what `files.getUploadURLExternal` was told, then its bytes.
+struct Upload {
+    name: String,
+    kind: String,
+    bytes: Vec<u8>,
+}
+
+fn uploads() -> std::sync::MutexGuard<'static, HashMap<String, Upload>> {
+    static UPLOADS: OnceLock<Mutex<HashMap<String, Upload>>> = OnceLock::new();
+    UPLOADS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The upload address taking the bytes, slowly and a little at a time, so
+/// the card's bar has time to move; an upload cancelled stops the reads.
+pub fn upload(url: &str, mut body: impl std::io::Read) -> Result<(), String> {
+    let id = url.rsplit("demo-").next().unwrap_or("").to_string();
+    let mut got = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        match body.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+            Err(e) => {
+                log("upload", &[("file_id", &id), ("error", &e.to_string()), ("bytes", &got.len().to_string())]);
+                return Err(e.to_string());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    log("upload", &[("file_id", &id), ("bytes", &got.len().to_string())]);
+    if let Some(u) = uploads().get_mut(&id) {
+        u.bytes = got;
+    }
+    Ok(())
+}
+
+/// What Ctrl+V finds on the clipboard: a picture of the demo's own, never the real clipboard.
+pub fn clipboard() -> crate::attach::Clip {
+    let bytes = PICS.iter().find(|(n, _)| *n == "dashboard.png").map(|(_, b)| b.to_vec()).unwrap_or_default();
+    crate::attach::Clip::Image { bytes, ext: "png", thumb: image::DynamicImage::new_rgba8(0, 0), w: 0, h: 0 }
+}
+
+/// A file uploaded here, as Slack lists it once it has it: a picture or a snippet.
+fn uploaded(id: &str, title: &str) -> Value {
+    let ups = uploads();
+    let Some(u) = ups.get(id) else { return json!({ "id": id }) };
+    let url = pic(&format!("up/{id}"));
+    let link = format!("https://acme.slack.com/files/{ME}/{id}/{}", u.name);
+    if let Ok(img) = image::load_from_memory(&u.bytes) {
+        let (w, h) = (img.width(), img.height());
+        return json!({ "id": id, "name": u.name, "title": title, "mimetype": "image/png", "filetype": "png", "pretty_type": "PNG", "size": u.bytes.len(),
+                       "user": ME, "original_w": w, "original_h": h, "thumb_720": url, "thumb_720_w": w, "thumb_720_h": h,
+                       "url_private": url, "url_private_download": url, "permalink": link });
+    }
+    let text = String::from_utf8_lossy(&u.bytes);
+    let lines = text.lines().count();
+    let kind = if u.kind.is_empty() { "text" } else { u.kind.as_str() };
+    let pretty = crate::snippet::TYPES.iter().find(|t| t.0 == kind).map_or("Plain Text", |t| t.1);
+    json!({ "id": id, "mode": "snippet", "name": u.name, "title": title, "filetype": kind, "pretty_type": pretty, "mimetype": "text/plain",
+            "size": u.bytes.len(), "user": ME, "lines": lines, "lines_more": lines.saturating_sub(5),
+            "preview": text.lines().take(5).collect::<Vec<_>>().join("\n"), "url_private": url, "url_private_download": url, "permalink": link })
+}
+
+/// `files.info`: the half-told picture in #design is still half-told the
+/// first time (Slack still on it), whole after; uploads as they went up.
+fn file_info(id: &str) -> Value {
+    static ASKED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if id == "F0PHONE" {
+        if ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return json!({ "ok": true, "file": { "id": id, "file_access": "check_file_info", "user": "U0HANA" } });
+        }
+        return json!({ "ok": true, "file": image("F0PHONE", "usability-heatmap.png", "U0HANA", "dashboard.png") });
+    }
+    if uploads().contains_key(id) {
+        return json!({ "ok": true, "file": uploaded(id, "") });
+    }
+    json!({ "ok": false, "error": "file_not_found" })
 }
 
 fn rand_us() -> u32 {

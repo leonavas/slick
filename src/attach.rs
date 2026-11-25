@@ -184,8 +184,7 @@ impl Slack {
             };
             f.progress.total.store(f.bytes.len() as u64, Ordering::Relaxed);
             let body = Slices { bytes: &f.bytes, pos: 0, progress: &f.progress, phase, tick, last: Instant::now() };
-            // A known length: sent as is, not chunked.
-            let sent = agent.post(url).set("Content-Type", "application/octet-stream").set("Content-Length", &len).send(body);
+            let sent = put(&agent, url, &len, body);
             if phase.load(Ordering::SeqCst) == CANCELLED {
                 return Err(cancelled());
             }
@@ -209,6 +208,15 @@ impl Slack {
         }
         self.call("files.completeUploadExternal", &p).map(|_| ())
     }
+}
+
+/// A file's bytes to its upload address. A known length: sent as is, not chunked.
+fn put(agent: &ureq::Agent, url: &str, len: &str, body: Slices) -> Result<(), String> {
+    #[cfg(feature = "demo")]
+    if crate::demo::on() {
+        return crate::demo::upload(url, body);
+    }
+    agent.post(url).set("Content-Type", "application/octet-stream").set("Content-Length", len).send(body).map(|_| ()).map_err(|e| e.to_string())
 }
 
 impl App {
@@ -598,6 +606,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, thread: bool) {
 const TYPES: [(&str, &str); 4] = [("image/png", "png"), ("image/jpeg", "jpg"), ("image/gif", "gif"), ("image/webp", "webp")];
 
 fn read_clipboard() -> Res<Clip> {
+    #[cfg(feature = "demo")]
+    let clip = if crate::demo::on() { crate::demo::clipboard() } else { raw_clipboard()? };
+    #[cfg(not(feature = "demo"))]
     let clip = raw_clipboard()?;
     let Clip::Image { bytes, ext, .. } = clip else { return Ok(clip) };
     let img = image::load_from_memory(&bytes).map_err(|e| trf!("pasted image: {e}", "imagem colada: {e}"))?;

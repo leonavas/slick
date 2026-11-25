@@ -13,7 +13,7 @@ use crate::slack::{Profile, Res, Slack};
 use crate::update::{Note, State};
 use crate::icons::Presence;
 use crate::ui::{dim, draw_avatar, draw_image, draw_presence, emoji_row, presence_span, truncate};
-use chrono::{Datelike, Days, Local, TimeZone};
+use chrono::{Datelike, Days, Local, NaiveTime, TimeZone, Timelike};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -28,6 +28,8 @@ const PAUSED: &str = "\u{f1f6}";
 const MENU_W: u16 = 46;
 /// Slack cuts a status at this many characters.
 const STATUS_MAX: usize = 100;
+/// The longest time "Choose date and time…" takes: "12:30 p.m.".
+const TIME_MAX: usize = 10;
 
 /// Slack's suggestions: emoji, text in English and Portuguese, and when it
 /// clears (an index into `CLEAR_EN`).
@@ -38,8 +40,12 @@ const PRESETS: [(&str, &str, &str, usize); 5] = [
     ("palm_tree", "Vacationing", "De férias", 0),
     ("house_with_garden", "Working remotely", "Trabalhando remotamente", 4),
 ];
-const CLEAR_EN: [&str; 6] = ["Don't clear", "30 minutes", "1 hour", "4 hours", "Today", "This week"];
-const CLEAR_PT: [&str; 6] = ["Não limpar", "30 minutos", "1 hora", "4 horas", "Hoje", "Esta semana"];
+const CLEAR_EN: [&str; 7] = ["Don't clear", "30 minutes", "1 hour", "4 hours", "Today", "This week", "Choose date and time…"];
+const CLEAR_PT: [&str; 7] = ["Não limpar", "30 minutos", "1 hora", "4 horas", "Hoje", "Esta semana", "Escolher data e hora…"];
+/// "Choose date and time…": a day and a time of your own (`Custom`).
+const CUSTOM: usize = 6;
+/// The last day "Choose date and time…" offers, in days from today.
+const LAST_DAY: u64 = 13;
 
 fn clear_label(i: usize) -> &'static str {
     if i18n::is_pt() { CLEAR_PT[i] } else { CLEAR_EN[i] }
@@ -48,6 +54,9 @@ fn clear_label(i: usize) -> &'static str {
 /// The status dialog's stops: emoji, text, the presets, "Clear after".
 const FIELDS: usize = 3 + PRESETS.len();
 const AFTER: usize = FIELDS - 1;
+/// With "Choose date and time…", two more stops under "Clear after": the day and the time.
+const DAY: usize = FIELDS;
+const TIME: usize = FIELDS + 1;
 /// The profile dialog's last stop: the photo button, then its path.
 const PHOTO: usize = 3;
 /// Where slick's code lives, shown in "About slick".
@@ -164,6 +173,95 @@ pub struct StatusDialog {
     clear: usize,
     field: usize,
     picker: Option<Picker>,
+    /// When the status it opened on clears itself (0: never).
+    end: i64,
+    /// "Choose date and time…"; None until first chosen.
+    custom: Option<Custom>,
+}
+
+/// The day and time "Choose date and time…" clears the status on.
+struct Custom {
+    /// Days from today, 0 to `LAST_DAY`.
+    day: u64,
+    /// The time as typed: "17:30", "1730", "17h30", "5pm"…
+    time: String,
+}
+
+impl Custom {
+    fn at(&self) -> Option<i64> {
+        let min = parse_time(&self.time)?;
+        let t = (Local::now().date_naive() + Days::new(self.day)).and_hms_opt(min / 60, min % 60, 0)?;
+        Local.from_local_datetime(&t).earliest().map(|t| t.timestamp())
+    }
+
+    /// When it clears; None for no time, or one gone by.
+    fn expiration(&self) -> Option<i64> {
+        self.at().filter(|t| *t > Local::now().timestamp())
+    }
+
+    /// When it clears, or what is wrong with it (false).
+    fn note(&self) -> (String, bool) {
+        match self.at() {
+            None => (tr("Not a valid time", "Horário inválido").into(), false),
+            Some(t) if t <= Local::now().timestamp() => (tr("Pick a time in the future", "Escolha um horário no futuro").into(), false),
+            Some(t) => (cap(&until(t)), true),
+        }
+    }
+
+    /// ↑ ↓: to the next quarter hour, over midnight to the next day or the one before.
+    fn step(&mut self, delta: i64) {
+        let base = parse_time(&self.time).unwrap_or(0) as i64;
+        let mut m = base / 15 * 15 + if base % 15 != 0 && delta < 0 { 15 } else { 0 } + delta;
+        if m < 0 {
+            if self.day > 0 {
+                (self.day, m) = (self.day - 1, m + 1440);
+            } else {
+                m = 0;
+            }
+        }
+        if m >= 1440 {
+            if self.day < LAST_DAY {
+                (self.day, m) = (self.day + 1, m - 1440);
+            } else {
+                m = 1439;
+            }
+        }
+        self.time = time_text(m as u32);
+    }
+
+    fn shift_day(&mut self, delta: i64) {
+        self.day = (self.day as i64 + delta).rem_euclid(LAST_DAY as i64 + 1) as u64;
+    }
+}
+
+/// First time "Choose date and time…" is chosen: on the status' own expiry
+/// when that is within two weeks, else the next full hour.
+fn start_custom(d: &mut StatusDialog) {
+    if d.custom.is_some() {
+        return;
+    }
+    let now = Local::now();
+    let at = Local.timestamp_opt(d.end, 0).single().filter(|_| d.end > 0);
+    let (day, min) = match at.map(|t| (t, (t.date_naive() - now.date_naive()).num_days())) {
+        Some((t, ahead)) if (0..=LAST_DAY as i64).contains(&ahead) => (ahead as u64, t.hour() * 60 + t.minute()),
+        _ => {
+            let next = now.hour() + 1;
+            ((next >= 24) as u64, next % 24 * 60)
+        }
+    };
+    d.custom = Some(Custom { day, time: time_text(min) });
+}
+
+fn set_clear(d: &mut StatusDialog, clear: usize) {
+    d.clear = clear;
+    if clear == CUSTOM {
+        start_custom(d);
+    }
+}
+
+/// The status dialog's stops: two more with "Choose date and time…".
+fn stops(d: &StatusDialog) -> usize {
+    if d.clear == CUSTOM { FIELDS + 2 } else { FIELDS }
 }
 
 #[derive(Default)]
@@ -286,6 +384,9 @@ pub struct Areas {
     text: Rect,
     presets: Vec<(Rect, usize)>,
     after: Rect,
+    /// "Choose date and time…": the day and the time.
+    day: Rect,
+    time: Rect,
     save: Rect,
     cancel: Rect,
     picker: Rect,
@@ -492,6 +593,77 @@ fn expiration(clear: usize) -> i64 {
         5 => end_of_day(6 - now.weekday().num_days_from_monday() as u64),
         _ => 0,
     }
+}
+
+/// "17:30", "1730", "17h30", "9", "5:30 pm", "5pm" → minutes of the day; None if not a time.
+fn parse_time(s: &str) -> Option<u32> {
+    let s = s.trim().to_lowercase();
+    let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+    let mut rest = &s[digits.len()..];
+    let (h, mut m): (u32, u32) = match digits.len() {
+        1 | 2 => (digits.parse().ok()?, 0),
+        3 | 4 => {
+            let (h, m) = digits.split_at(digits.len() - 2);
+            (h.parse().ok()?, m.parse().ok()?)
+        }
+        _ => return None,
+    };
+    if digits.len() <= 2 {
+        if let Some(r) = rest.strip_prefix([':', 'h', '.']) {
+            let mm: String = r.chars().take_while(char::is_ascii_digit).collect();
+            if mm.len() != 2 {
+                return None;
+            }
+            (m, rest) = (mm.parse().ok()?, &r[2..]);
+        }
+    }
+    let rest = rest.trim_start();
+    let pm = match rest.chars().next() {
+        None => None,
+        Some('a') => Some(false),
+        Some('p') => Some(true),
+        _ => return None,
+    };
+    if pm.is_some() {
+        // "pm", "p.m.", "p m", "p".
+        let tail = &rest[1..];
+        let tail = tail.strip_prefix('.').unwrap_or(tail).trim_start();
+        let tail = tail.strip_prefix('m').unwrap_or(tail);
+        if !tail.strip_prefix('.').unwrap_or(tail).is_empty() {
+            return None;
+        }
+    }
+    let h = match pm {
+        _ if m > 59 => return None,
+        Some(pm) if (1..=12).contains(&h) => h % 12 + if pm { 12 } else { 0 },
+        None if h <= 23 => h,
+        _ => return None,
+    };
+    Some(h * 60 + m)
+}
+
+/// Minutes of the day as the clock shows them: "17:30" or "5:30 PM".
+fn time_text(min: u32) -> String {
+    NaiveTime::from_hms_opt(min / 60 % 24, min % 60, 0).map(|t| i18n::clock(&t)).unwrap_or_default()
+}
+
+/// "Today", "Tomorrow", "Wed, Nov 27"; "Hoje", "Amanhã", "Qua, 27/11".
+fn day_name(days: u64) -> String {
+    match days {
+        0 => tr("Today", "Hoje").into(),
+        1 => tr("Tomorrow", "Amanhã").into(),
+        _ => {
+            let d = Local::now().date_naive() + Days::new(days);
+            let wd = cap(&i18n::weekday(&d).chars().take(3).collect::<String>());
+            let (month, day, dm) = (&i18n::month(&d)[..3], d.day(), d.format("%d/%m"));
+            trf!("{wd}, {month} {day}", "{wd}, {dm}")
+        }
+    }
+}
+
+fn cap(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// Minutes until 9am tomorrow, Slack's "until tomorrow".
@@ -1011,7 +1183,8 @@ impl App {
     pub(crate) fn open_status_dialog(&mut self) {
         let (emoji, text) = self.my_status();
         let emoji = emoji.trim_matches(':').to_string();
-        self.account.dialog = Some(StatusDialog { emoji, text, clear: 0, field: 1, picker: None });
+        let end = self.my_id().and_then(|me| self.users.status_ends.get(&me).copied()).unwrap_or(0);
+        self.account.dialog = Some(StatusDialog { emoji, text, clear: 0, field: 1, picker: None, end, custom: None });
     }
 
     fn choose(&mut self, item: Item) {
@@ -1225,10 +1398,25 @@ impl App {
     }
 
     fn submit_status(&mut self) {
-        let Some(d) = self.account.dialog.take() else { return };
+        let Some(d) = self.account.dialog.as_mut() else { return };
         let text: String = d.text.trim().chars().take(STATUS_MAX).collect();
         let emoji = if d.emoji.is_empty() { String::new() } else { format!(":{}:", d.emoji) };
-        let exp = if text.is_empty() && emoji.is_empty() { 0 } else { expiration(d.clear) };
+        let exp = if text.is_empty() && emoji.is_empty() {
+            0
+        } else if d.clear == CUSTOM {
+            // No time, or one gone by: stays open on the time, and says why.
+            match d.custom.as_ref().map(|c| (c.expiration(), c.note().0)) {
+                Some((Some(t), _)) => t,
+                Some((None, why)) => {
+                    d.field = TIME;
+                    return self.brief(why, 3);
+                }
+                None => return,
+            }
+        } else {
+            expiration(d.clear)
+        };
+        self.account.dialog = None;
         self.save_status(emoji, text, exp);
     }
 
@@ -1237,6 +1425,12 @@ impl App {
         let Some(d) = self.account.dialog.as_mut() else { return };
         match d.picker.as_mut() {
             Some(p) => p.query.push_str(line),
+            None if d.field == TIME => {
+                if let Some(c) = d.custom.as_mut() {
+                    c.time.push_str(line);
+                    c.time = c.time.chars().take(TIME_MAX).collect();
+                }
+            }
             None => {
                 d.text.push_str(line);
                 d.text = d.text.chars().take(STATUS_MAX).collect();
@@ -1269,18 +1463,41 @@ impl App {
             }
             return;
         }
-        let save = (ctrl && matches!(k.code, KeyCode::Enter | KeyCode::Char('j'))) || (k.code == KeyCode::Enter && matches!(d.field, 1 | AFTER));
+        let save = (ctrl && matches!(k.code, KeyCode::Enter | KeyCode::Char('j'))) || (k.code == KeyCode::Enter && matches!(d.field, 1 | AFTER | DAY | TIME));
         if save {
             return self.submit_status();
         }
+        let n = stops(d);
+        // The day and the time of "Choose date and time…".
+        if let Some(c) = d.custom.as_mut().filter(|_| d.field >= DAY) {
+            match k.code {
+                KeyCode::Up if d.field == TIME => return c.step(15),
+                KeyCode::Down if d.field == TIME => return c.step(-15),
+                KeyCode::Left if d.field == DAY => return c.shift_day(-1),
+                KeyCode::Right | KeyCode::Char(' ') if d.field == DAY => return c.shift_day(1),
+                KeyCode::Char('u') if ctrl && d.field == TIME => return c.time.clear(),
+                KeyCode::Backspace if d.field == TIME => {
+                    c.time.pop();
+                    return;
+                }
+                KeyCode::Char(ch) if !ctrl && d.field == TIME => {
+                    if c.time.chars().count() < TIME_MAX {
+                        c.time.push(ch);
+                    }
+                    return;
+                }
+                KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {}
+                _ => return,
+            }
+        }
         match k.code {
             KeyCode::Esc => self.account.dialog = None,
-            KeyCode::Tab | KeyCode::Down => d.field = (d.field + 1) % FIELDS,
-            KeyCode::BackTab | KeyCode::Up => d.field = (d.field + FIELDS - 1) % FIELDS,
+            KeyCode::Tab | KeyCode::Down => d.field = (d.field + 1) % n,
+            KeyCode::BackTab | KeyCode::Up => d.field = (d.field + n - 1) % n,
             KeyCode::Enter if d.field == 0 => d.picker = Some(Picker::default()),
             KeyCode::Enter => Self::apply_preset(d, d.field - 2),
-            KeyCode::Left if d.field == AFTER => d.clear = (d.clear + CLEAR_EN.len() - 1) % CLEAR_EN.len(),
-            KeyCode::Right | KeyCode::Char(' ') if d.field == AFTER => d.clear = (d.clear + 1) % CLEAR_EN.len(),
+            KeyCode::Left if d.field == AFTER => set_clear(d, (d.clear + CLEAR_EN.len() - 1) % CLEAR_EN.len()),
+            KeyCode::Right | KeyCode::Char(' ') if d.field == AFTER => set_clear(d, (d.clear + 1) % CLEAR_EN.len()),
             KeyCode::Backspace | KeyCode::Delete if d.field == 0 => d.emoji.clear(),
             KeyCode::Backspace => {
                 d.text.pop();
@@ -1386,6 +1603,7 @@ impl App {
         let (in_picker, in_dialog) = (a.picker.contains(at), a.dialog.contains(at));
         let (emoji, text, after, save, cancel) =
             (a.emoji.contains(at), a.text.contains(at), a.after.contains(at), a.save.contains(at), a.cancel.contains(at));
+        let (day, time) = (a.day.contains(at), a.time.contains(at));
         let left = m.kind == MouseEventKind::Down(MouseButton::Left);
         let Some(d) = self.account.dialog.as_mut() else { return };
         if let Some(p) = d.picker.as_mut() {
@@ -1411,7 +1629,15 @@ impl App {
         } else if let Some(i) = preset {
             Self::apply_preset(d, i);
         } else if after {
-            (d.field, d.clear) = (AFTER, (d.clear + 1) % CLEAR_EN.len());
+            d.field = AFTER;
+            set_clear(d, (d.clear + 1) % CLEAR_EN.len());
+        } else if day {
+            d.field = DAY;
+            if let Some(c) = d.custom.as_mut() {
+                c.shift_day(1);
+            }
+        } else if time {
+            d.field = TIME;
         }
     }
 }
@@ -1520,6 +1746,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let a = &mut app.areas.account;
     (a.menu, a.sub, a.clear) = Default::default();
     (a.dialog, a.emoji, a.text, a.after, a.save, a.cancel, a.picker) = Default::default();
+    (a.day, a.time) = Default::default();
     a.rows.clear();
     a.presets.clear();
     a.picker_rows.clear();
@@ -2000,6 +2227,7 @@ fn draw_sub(f: &mut Frame, app: &mut App, main: Rect, y: u16, parent: Item, sel:
 fn draw_dialog(f: &mut Frame, app: &mut App) {
     let Some(d) = &app.account.dialog else { return };
     let (emoji, text, clear, field) = (d.emoji.clone(), d.text.clone(), d.clear, d.field);
+    let custom = d.custom.as_ref().filter(|_| clear == CUSTOM).map(|c| (day_name(c.day), c.time.clone(), c.note()));
     let picker = d.picker.as_ref().map(|p| (p.query.clone(), p.sel));
     let area = f.area();
     let (w, h) = (56.min(area.width.saturating_sub(4)), 18.min(area.height.saturating_sub(2)));
@@ -2061,15 +2289,52 @@ fn draw_dialog(f: &mut Frame, app: &mut App) {
     f.render_widget(Paragraph::new(line), Rect::new(inner.x, ay, inner.width, 1));
     app.areas.account.after = Rect::new(inner.x, ay, (2 + after.width() + choice.width()) as u16, 1).intersection(inner);
 
+    // "Choose date and time…": the day, the time as typed, and when that is or what is wrong.
+    let mut can_save = true;
+    if let Some((day, time, (note, ok))) = &custom {
+        let cy = ay + 1;
+        can_save = *ok;
+        let mark = if matches!(field, DAY | TIME) { Span::styled("› ", Style::new().fg(Color::Cyan).bold()) } else { Span::raw("  ") };
+        let day = format!("‹ {day} ›");
+        let tw = 8.max(time.width()) + 2;
+        let time_span = if time.is_empty() {
+            let hold = if i18n::h12() { "5:30 PM" } else { "17:30" };
+            Span::styled(format!(" {hold:<w$} ", w = tw - 2), dim().bg(Color::Indexed(236)))
+        } else {
+            Span::styled(format!(" {time:<w$} ", w = tw - 2), Style::new().bg(Color::Indexed(236)))
+        };
+        let note_style = if *ok { dim() } else { Style::new().fg(Color::Red) };
+        let line = Line::from(vec![
+            mark,
+            Span::styled(day.clone(), selected(DAY).fg(Color::Cyan)),
+            Span::raw("  "),
+            time_span,
+            Span::raw("  "),
+            Span::styled(note.clone(), note_style),
+        ]);
+        f.render_widget(Paragraph::new(line), Rect::new(inner.x, cy, inner.width, 1));
+        let day_r = Rect::new(inner.x + 2, cy, day.width() as u16, 1).intersection(inner);
+        let time_r = Rect::new(day_r.right() + 2, cy, tw as u16, 1).intersection(inner);
+        (app.areas.account.day, app.areas.account.time) = (day_r, time_r);
+        if field == TIME && picker.is_none() {
+            f.set_cursor_position(((time_r.x + 1 + time.width() as u16).min(inner.right().saturating_sub(1)), cy));
+        }
+    }
+
     // Hint, then Cancel and Save on the right.
     let by = inner.bottom().saturating_sub(1);
     let (save, cancel) = (tr(" Save ", " Salvar "), tr(" Cancel ", " Cancelar "));
     let save_r = Rect::new(inner.right().saturating_sub(save.width() as u16), by, save.width() as u16, 1);
     let cancel_r = Rect::new(save_r.x.saturating_sub(cancel.width() as u16 + 1), by, cancel.width() as u16, 1);
-    f.render_widget(Paragraph::new(Span::styled(save, Style::new().fg(Color::Black).bg(Color::Green).bold())), save_r);
+    let save_style = if can_save { Style::new().fg(Color::Black).bg(Color::Green).bold() } else { dim().bg(Color::Indexed(236)) };
+    f.render_widget(Paragraph::new(Span::styled(save, save_style)), save_r);
     f.render_widget(Paragraph::new(Span::styled(cancel, Style::new().bg(Color::Indexed(236)))), cancel_r);
     let hint_w = cancel_r.x.saturating_sub(inner.x + 1);
-    let hint = tr("Tab fields · Enter saves · Esc cancels", "Tab campos · Enter salva · Esc cancela");
+    let hint = match field {
+        DAY => tr("← → day · Enter saves · Esc cancels", "← → dia · Enter salva · Esc cancela"),
+        TIME => tr("17:30, 5pm · ↑ ↓ 15 min · Enter saves", "17:30, 17h30 · ↑ ↓ 15 min · Enter salva"),
+        _ => tr("Tab fields · Enter saves · Esc cancels", "Tab campos · Enter salva · Esc cancela"),
+    };
     f.render_widget(Paragraph::new(truncate(hint, hint_w as usize)).style(dim()), Rect::new(inner.x, by, hint_w, 1));
     (app.areas.account.save, app.areas.account.cancel) = (save_r, cancel_r);
 

@@ -102,12 +102,13 @@ pub enum Look {
     Danger,
     /// Selects, overflow menus and date pickers.
     Menu,
+    /// A text box of an input block: only shown.
+    Field,
 }
 
 /// A button or menu, keeping what Slack needs to answer a click
-/// (`blocks.actions`) for when the app learns to do it.
+/// (`blocks.actions`, `actions::answer`).
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct Button {
     pub label: String,
     pub look: Look,
@@ -117,6 +118,33 @@ pub struct Button {
     pub value: String,
     /// The message it belongs to.
     pub ts: String,
+    /// The element's type: `button`, `static_select`, `checkboxes`…
+    pub kind: String,
+    /// The element as Slack sent it: its options, `confirm`, style.
+    pub el: Value,
+    /// A legacy attachment's button (`chat.attachmentAction`): the
+    /// attachment's id and its callback_id.
+    pub legacy: Option<(String, String)>,
+    /// Overflow and static menus, checkboxes and radio buttons: the choices.
+    pub options: Vec<Opt>,
+    /// One row of checkboxes or radio buttons: the choice it is.
+    pub option: Option<String>,
+}
+
+impl Button {
+    /// Checkboxes or radio buttons: drawn as rows, one per choice.
+    pub fn is_choices(&self) -> bool {
+        self.kind == "checkboxes" || self.kind == "radio_buttons"
+    }
+}
+
+/// A choice of a menu or of checkboxes: its text, value and whether it's on.
+#[derive(Clone)]
+pub struct Opt {
+    pub label: String,
+    pub desc: String,
+    pub value: String,
+    pub on: bool,
 }
 
 pub enum Accessory {
@@ -129,6 +157,8 @@ pub enum Piece {
     Text(Vec<Para>, Option<Accessory>),
     /// A section's fields, two per row.
     Fields(Vec<Vec<Para>>),
+    /// A table block or a Markdown table: rows of cells, the first one the header.
+    Table(Vec<Vec<Vec<Seg>>>),
     Divider,
     Controls(Vec<Button>),
     Image { img: ImgRef, w: u32, h: u32, title: String },
@@ -337,9 +367,17 @@ fn blocks(bs: &[Value], n: &Names, ts: &str) -> Vec<Piece> {
             }
             "context" => {
                 let mut segs = Vec::new();
-                for e in elements(b).filter(|e| e["type"] != "image") {
+                for e in elements(b) {
                     if !segs.is_empty() {
                         segs.push(Seg::new("  ", Style::new()));
+                    }
+                    // Pictures among the words, in order, at an emoji's size.
+                    if e["type"] == "image" {
+                        if let Some(url) = image_url(e) {
+                            let alt = e["alt_text"].as_str().unwrap_or("");
+                            segs.push(Seg { text: "\u{3000}".into(), emoji: Some(block_img(&url, alt)), ..Default::default() });
+                        }
+                        continue;
                     }
                     for (i, p) in text_obj(e, n).into_iter().enumerate() {
                         if i > 0 {
@@ -358,6 +396,32 @@ fn blocks(bs: &[Value], n: &Names, ts: &str) -> Vec<Piece> {
                 let bs: Vec<_> = elements(b).filter_map(|e| control(e, n, block_id, ts)).collect();
                 if !bs.is_empty() {
                     out.push(Piece::Controls(bs));
+                }
+            }
+            "input" => {
+                let mut label = vec![Seg::new(plain(&b["label"], n), Style::new().bold())];
+                if b["optional"] == true {
+                    label.push(Seg::new(tr(" (optional)", " (opcional)"), dim()));
+                }
+                out.push(Piece::Text(vec![Para::plain(label)], None));
+                if let Some(c) = control(&b["element"], n, block_id, ts) {
+                    out.push(Piece::Controls(vec![c]));
+                }
+                let hint = plain(&b["hint"], n);
+                if !hint.is_empty() {
+                    out.push(Piece::Text(vec![Para::plain(vec![Seg::new(hint, dim())])], None));
+                }
+            }
+            "markdown" => out.extend(markdown(b["text"].as_str().unwrap_or(""), n)),
+            "table" => {
+                let rows: Vec<Vec<Vec<Seg>>> = b["rows"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|r| r.as_array().into_iter().flatten().map(|c| cell(c, n)).collect())
+                    .collect();
+                if !rows.is_empty() {
+                    out.push(Piece::Table(rows));
                 }
             }
             "divider" => out.push(Piece::Divider),
@@ -436,8 +500,17 @@ fn accessory(e: &Value, n: &Names, block_id: &str, ts: &str) -> Option<Accessory
 fn control(e: &Value, n: &Names, block_id: &str, ts: &str) -> Option<Button> {
     let or = |s: String, default: &str| if s.is_empty() { default.to_string() } else { s };
     let placeholder = |default: &str| or(plain(&e["placeholder"], n), default);
-    let (label, look) = match e["type"].as_str()? {
-        "button" => {
+    let opt = |o: &Value, on: bool| Opt { label: plain(&o["text"], n), desc: plain(&o["description"], n), value: str_of(&o["value"]), on };
+    let all: Vec<&Value> = e["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(e["option_groups"].as_array().into_iter().flatten().flat_map(|g| g["options"].as_array().into_iter().flatten()))
+        .collect();
+    let mut options = Vec::new();
+    let kind = e["type"].as_str()?;
+    let (label, look) = match kind {
+        "button" | "workflow_button" => {
             let look = match e["style"].as_str() {
                 Some("primary") => Look::Primary,
                 Some("danger") => Look::Danger,
@@ -445,10 +518,35 @@ fn control(e: &Value, n: &Names, block_id: &str, ts: &str) -> Option<Button> {
             };
             (or(plain(&e["text"], n), "…"), look)
         }
-        "overflow" => ("⋯".into(), Look::Menu),
+        "overflow" => {
+            options = all.iter().map(|o| opt(o, false)).collect();
+            ("⋯".into(), Look::Menu)
+        }
+        "checkboxes" | "radio_buttons" => {
+            let picked: Vec<&Value> = e["initial_options"].as_array().into_iter().flatten().chain(e.get("initial_option")).map(|o| &o["value"]).collect();
+            options = all.iter().map(|o| opt(o, picked.contains(&&o["value"]))).collect();
+            (String::new(), Look::Menu)
+        }
         "datepicker" => (or(str_of(&e["initial_date"]), &placeholder(tr("Pick a date", "Escolher data"))), Look::Menu),
         "timepicker" => (or(str_of(&e["initial_time"]), &placeholder(tr("Pick a time", "Escolher hora"))), Look::Menu),
-        t if t.ends_with("_select") => (or(plain(&e["initial_option"]["text"], n), &placeholder(tr("Select", "Escolher"))), Look::Menu),
+        "datetimepicker" => {
+            let at = e["initial_date_time"].as_i64().and_then(|t| Local.timestamp_opt(t, 0).single());
+            let shown = at.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+            (or(shown, &placeholder(tr("Pick a date and time", "Escolher data e hora"))), Look::Menu)
+        }
+        "plain_text_input" | "email_text_input" | "url_text_input" | "number_input" | "rich_text_input" | "file_input" => {
+            (or(any_text(&e["initial_value"]), &placeholder("…")), Look::Field)
+        }
+        t if t.ends_with("_select") => {
+            options = all.iter().map(|o| opt(o, false)).collect();
+            let ids = |one: &str, many: &str| e[many].as_array().into_iter().flatten().chain(e.get(one)).filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>();
+            let mut picks: Vec<String> = e["initial_options"].as_array().into_iter().flatten().chain(e.get("initial_option")).map(|o| plain(&o["text"], n)).collect();
+            picks.extend(ids("initial_user", "initial_users").iter().map(|u| format!("@{}", n.user(u).unwrap_or(u))));
+            for (one, many) in [("initial_conversation", "initial_conversations"), ("initial_channel", "initial_channels")] {
+                picks.extend(ids(one, many).iter().map(|c| n.chan(c).map(|x| format!("#{x}")).or_else(|| n.place(c).map(|p| p.1)).unwrap_or_else(|| c.clone())));
+            }
+            (or(picks.join(", "), &placeholder(tr("Select", "Escolher"))), Look::Menu)
+        }
         _ => return None,
     };
     let action_id = e["action_id"].as_str().or(e["name"].as_str()).unwrap_or("").to_string();
@@ -460,7 +558,187 @@ fn control(e: &Value, n: &Names, block_id: &str, ts: &str) -> Option<Button> {
         block_id: block_id.to_string(),
         value: str_of(&e["value"]),
         ts: ts.to_string(),
+        kind: kind.to_string(),
+        el: e.clone(),
+        legacy: None,
+        options,
+        option: None,
     })
+}
+
+/// A table cell: raw text, or rich text on one line.
+fn cell(c: &Value, n: &Names) -> Vec<Seg> {
+    let paras = if c["type"] == "rich_text" { rich_text(c, n) } else { vec![Para::plain(vec![Seg::new(text::shortcodes(c["text"].as_str().unwrap_or("")), Style::new())])] };
+    let mut segs = Vec::new();
+    for (i, p) in paras.into_iter().enumerate() {
+        if i > 0 {
+            segs.push(Seg::new(" ", Style::new()));
+        }
+        segs.extend(p.segs.into_iter().map(|mut s| {
+            s.text = s.text.replace('\n', " ");
+            s
+        }));
+    }
+    segs
+}
+
+/// Block Kit's `markdown` block (standard Markdown, what AI apps send) as
+/// pieces: headings, rules and tables of their own, the rest through mrkdwn.
+fn markdown(src: &str, n: &Names) -> Vec<Piece> {
+    let mut out = Vec::new();
+    let mut buf: Vec<String> = Vec::new();
+    let flush = |buf: &mut Vec<String>, out: &mut Vec<Piece>| {
+        while buf.last().is_some_and(|l| l.is_empty()) {
+            buf.pop();
+        }
+        if !buf.is_empty() {
+            out.push(Piece::Text(mrkdwn(&buf.join("\n"), n), None));
+            buf.clear();
+        }
+    };
+    let cells = |l: &str| -> Vec<String> {
+        let l = l.trim();
+        let l = l.strip_prefix('|').unwrap_or(l);
+        let l = l.strip_suffix('|').unwrap_or(l);
+        l.split('|').map(|c| c.trim().to_string()).collect()
+    };
+    let is_rule = |l: &str| {
+        let t = l.trim();
+        t.contains('-') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+    };
+    let is_hr = |t: &str| {
+        let t: String = t.chars().filter(|c| *c != ' ').collect();
+        t.len() >= 3 && ['-', '*', '_'].iter().any(|&m| t.chars().all(|c| c == m))
+    };
+    let lines: Vec<&str> = src.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            // mrkdwn knows code blocks: kept as they are.
+            let fence = &t[..3];
+            buf.push("```".into());
+            i += 1;
+            while i < lines.len() && !lines[i].trim_start().starts_with(fence) {
+                buf.push(lines[i].to_string());
+                i += 1;
+            }
+            buf.push("```".into());
+            i += 1;
+            continue;
+        }
+        if line.contains('|') && lines.get(i + 1).is_some_and(|l| is_rule(l)) {
+            flush(&mut buf, &mut out);
+            let mut rows = vec![cells(line)];
+            i += 2;
+            while i < lines.len() && lines[i].contains('|') && !lines[i].trim().is_empty() {
+                rows.push(cells(lines[i]));
+                i += 1;
+            }
+            let rows = rows.iter().map(|r| r.iter().map(|c| mrkdwn(&md_inline(c), n).into_iter().flat_map(|p| p.segs).collect()).collect()).collect();
+            out.push(Piece::Table(rows));
+            continue;
+        }
+        if is_hr(t) {
+            flush(&mut buf, &mut out);
+            out.push(Piece::Divider);
+            i += 1;
+            continue;
+        }
+        let hashes = t.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&hashes) && t[hashes..].starts_with(' ') {
+            flush(&mut buf, &mut out);
+            let mut paras = mrkdwn(&md_inline(t[hashes..].trim().trim_end_matches('#').trim_end()), n);
+            restyle(&mut paras, |s| s.bold());
+            out.push(Piece::Text(paras, None));
+            i += 1;
+            continue;
+        }
+        // Lists: bullets by depth; a task's box drawn.
+        let indent = line.len() - t.len();
+        let item = t.strip_prefix("- ").or(t.strip_prefix("* ")).or(t.strip_prefix("+ "));
+        if let Some(rest) = item {
+            let pad = "   ".repeat(indent / 2);
+            let (mark, rest) = match (rest.strip_prefix("[ ] "), rest.strip_prefix("[x] ").or(rest.strip_prefix("[X] "))) {
+                (Some(r), _) => ("☐", r),
+                (_, Some(r)) => ("☑", r),
+                _ => (["•", "◦", "▪"][(indent / 2) % 3], rest),
+            };
+            buf.push(format!("{pad}{mark} {}", md_inline(rest)));
+        } else if t.is_empty() {
+            if buf.last().is_some_and(|l| !l.is_empty()) {
+                buf.push(String::new());
+            }
+        } else {
+            buf.push(format!("{}{}", &line[..indent], md_inline(t)));
+        }
+        i += 1;
+    }
+    flush(&mut buf, &mut out);
+    out
+}
+
+/// Markdown's inline marks as mrkdwn: `**b**` → `*b*`, `*i*` → `_i_`,
+/// `~~s~~` → `~s~`, `[t](u)` → `<u|t>`; code is left alone.
+fn md_inline(s: &str) -> String {
+    let cs: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    let find = |from: usize, mark: &[char]| (from..(cs.len() + 1).saturating_sub(mark.len())).find(|&k| cs[k..k + mark.len()] == *mark);
+    let sub = |a: usize, b: usize| cs[a..b].iter().collect::<String>();
+    while i < cs.len() {
+        let c = cs[i];
+        let next = cs.get(i + 1).copied();
+        if c == '\\' && next.is_some_and(|n| "\\`*_{}[]()#+-.!~|>".contains(n)) {
+            out.push(cs[i + 1]);
+            i += 2;
+            continue;
+        }
+        if c == '`' {
+            if let Some(k) = find(i + 1, &['`']) {
+                out.push_str(&sub(i, k + 1));
+                i = k + 1;
+                continue;
+            }
+        }
+        if (c == '*' || c == '_') && next == Some(c) {
+            if let Some(k) = find(i + 2, &[c, c]).filter(|&k| k > i + 2) {
+                out.push_str(&format!("*{}*", md_inline(&sub(i + 2, k))));
+                i = k + 2;
+                continue;
+            }
+        }
+        if c == '~' && next == Some('~') {
+            if let Some(k) = find(i + 2, &['~', '~']).filter(|&k| k > i + 2) {
+                out.push_str(&format!("~{}~", md_inline(&sub(i + 2, k))));
+                i = k + 2;
+                continue;
+            }
+        }
+        if (c == '*' || c == '_') && next.is_some_and(|n| !n.is_whitespace()) && (i == 0 || !cs[i - 1].is_alphanumeric()) {
+            if let Some(k) = find(i + 1, &[c]).filter(|&k| k > i + 1 && !cs[k - 1].is_whitespace()) {
+                out.push_str(&format!("_{}_", md_inline(&sub(i + 1, k))));
+                i = k + 1;
+                continue;
+            }
+        }
+        if c == '[' {
+            if let Some(close) = find(i + 1, &[']']).filter(|&k| cs.get(k + 1) == Some(&'(')) {
+                if let Some(end) = find(close + 2, &[')']) {
+                    let url = sub(close + 2, end).split_whitespace().next().unwrap_or("").to_string();
+                    let text = sub(i + 1, close);
+                    let text = if text.is_empty() { url.clone() } else { md_inline(&text) };
+                    out.push_str(&format!("<{url}|{text}>"));
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 fn attachment(a: &Value, n: &Names, ts: &str) -> Vec<Piece> {
@@ -522,7 +800,14 @@ fn attachment(a: &Value, n: &Names, ts: &str) -> Vec<Piece> {
         inner.push(Piece::Image { img: block_img(u, get("title").unwrap_or(tr("image", "imagem"))), w: size("image_width"), h: size("image_height"), title: String::new() });
     }
     let callback = a["callback_id"].as_str().unwrap_or("");
-    let bs: Vec<_> = a["actions"].as_array().into_iter().flatten().filter_map(|e| control(e, n, callback, ts)).collect();
+    let legacy = Some((any_text(&a["id"]), callback.to_string()));
+    let bs: Vec<_> = a["actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| control(e, n, callback, ts))
+        .map(|b| Button { legacy: legacy.clone(), ..b })
+        .collect();
     if !bs.is_empty() {
         inner.push(Piece::Controls(bs));
     }
@@ -1185,6 +1470,7 @@ pub fn render(pieces: &[Piece], width: usize, font: Option<(u16, u16)>, base: St
         match p {
             Piece::Text(paras, acc) => text_piece(&mut out, paras, acc.as_ref(), width, font, base),
             Piece::Fields(fs) => fields(&mut out, fs, width, base),
+            Piece::Table(rows) => table(&mut out, rows, width, base),
             Piece::Divider => out.lines.push(Line::from(Span::styled("─".repeat(width), dim()))),
             Piece::Controls(bs) => controls(&mut out, bs, width),
             Piece::Image { img, w, h, title } => {
@@ -1613,6 +1899,11 @@ fn rows_of(paras: &[Para], width: usize, base: Style) -> Vec<Row> {
 
 fn text_piece(out: &mut Out, paras: &[Para], acc: Option<&Accessory>, width: usize, font: Option<(u16, u16)>, base: Style) {
     match (acc, font) {
+        // Checkboxes and radio buttons: their rows under the text.
+        (Some(Accessory::Button(b)), _) if b.is_choices() => {
+            rows_of(paras, width, base).into_iter().for_each(|r| push_row(out, r));
+            choices(out, b, width);
+        }
         // Like Slack, the accessory sits at the top right of the text.
         (Some(Accessory::Button(b)), _) => {
             let p = pill(b, width);
@@ -1676,10 +1967,18 @@ fn fields(out: &mut Out, fs: &[Vec<Para>], width: usize, base: Style) {
     }
 }
 
-/// A row of buttons, wrapping when it does not fit.
+/// A row of buttons, wrapping when it does not fit; checkboxes and radio
+/// buttons get rows of their own.
 fn controls(out: &mut Out, bs: &[Button], width: usize) {
     let mut row = Row::default();
     for b in bs {
+        if b.is_choices() {
+            if row.w > 0 {
+                push_row(out, std::mem::take(&mut row));
+            }
+            choices(out, b, width);
+            continue;
+        }
         let p = pill(b, width);
         if row.w > 0 && row.w + 1 + p.w > width {
             push_row(out, std::mem::take(&mut row));
@@ -1689,7 +1988,86 @@ fn controls(out: &mut Out, bs: &[Button], width: usize) {
         }
         row.append(p);
     }
-    push_row(out, row);
+    if row.w > 0 {
+        push_row(out, row);
+    }
+}
+
+/// Checkboxes (☐ ☑) or radio buttons (○ ◉), one choice a row; a click on
+/// one answers as that choice (`Button::option`).
+fn choices(out: &mut Out, b: &Button, width: usize) {
+    let radio = b.kind == "radio_buttons";
+    for o in &b.options {
+        let mark = match (radio, o.on) {
+            (false, false) => "☐",
+            (false, true) => "☑",
+            (true, false) => "○",
+            (true, true) => "◉",
+        };
+        let target = Target::Button(Button { option: Some(o.value.clone()), ..b.clone() });
+        let mut row = Row::default();
+        let style = if o.on { Style::new().fg(Color::Green) } else { dim() };
+        row.push(format!("{mark} "), style, Some(target.clone()));
+        row.push(truncate(&o.label, width.saturating_sub(2)), Style::new(), Some(target));
+        push_row(out, row);
+        if !o.desc.is_empty() {
+            let mut d = Row::default();
+            d.push(format!("  {}", truncate(&o.desc, width.saturating_sub(2))), dim(), None);
+            push_row(out, d);
+        }
+    }
+}
+
+/// A table: columns as wide as their text, shrunk to fit, the first row
+/// bold over a rule; cells too long end in "…".
+fn table(out: &mut Out, rows: &[Vec<Vec<Seg>>], width: usize, base: Style) {
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if cols == 0 {
+        return;
+    }
+    let text = |c: &[Seg]| c.iter().map(|s| s.text.as_str()).collect::<String>();
+    let mut ws: Vec<usize> = (0..cols).map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| text(c).width()).max().unwrap_or(0).max(1)).collect();
+    // Room for the " │ " between columns; the widest gives way first.
+    let room = width.saturating_sub(3 * (cols - 1)).max(cols);
+    while ws.iter().sum::<usize>() > room {
+        let Some((i, _)) = ws.iter().enumerate().max_by_key(|(_, w)| **w) else { break };
+        if ws[i] <= 1 {
+            break;
+        }
+        ws[i] -= 1;
+    }
+    for (k, r) in rows.iter().enumerate() {
+        let mut row = Row::default();
+        let mut x = 0;
+        for (i, w) in ws.iter().enumerate() {
+            if i > 0 {
+                row.pad_to(x);
+                row.push(" │ ".into(), dim(), None);
+                x += 3;
+            }
+            let segs = r.get(i).map(Vec::as_slice).unwrap_or(&[]);
+            let mut left = *w;
+            for s in segs {
+                if left == 0 {
+                    break;
+                }
+                let t = truncate(&s.text, left);
+                left = left.saturating_sub(t.width());
+                let style = if k == 0 { base.patch(s.style).bold() } else { base.patch(s.style) };
+                let target = s.target.clone().or_else(|| s.url.clone().map(Target::Link));
+                if let Some(img) = &s.emoji {
+                    row.pics.push((row.w, img.clone()));
+                }
+                row.push(t, style, target);
+            }
+            x += w;
+        }
+        push_row(out, row);
+        if k == 0 && rows.len() > 1 {
+            let rule = ws.iter().map(|w| "─".repeat(*w)).collect::<Vec<_>>().join("─┼─");
+            out.lines.push(Line::from(Span::styled(rule, dim())));
+        }
+    }
 }
 
 /// A rounded, filled button; menus are quieter and get a ▾.
@@ -1698,9 +2076,9 @@ fn pill(b: &Button, max: usize) -> Row {
         Look::Primary => (Color::Black, Color::Green),
         Look::Danger => (Color::White, Color::Red),
         Look::Default => (Color::White, Color::DarkGray),
-        Look::Menu => (Color::Gray, Color::Indexed(236)),
+        Look::Menu | Look::Field => (Color::Gray, Color::Indexed(236)),
     };
-    let face = if b.look == Look::Menu { Style::new().fg(fg).bg(bg) } else { Style::new().fg(fg).bg(bg).bold() };
+    let face = if matches!(b.look, Look::Menu | Look::Field) { Style::new().fg(fg).bg(bg) } else { Style::new().fg(fg).bg(bg).bold() };
     let arrow = if b.look == Look::Menu && b.label != "⋯" { " ▾" } else { "" };
     let label = truncate(&b.label, max.saturating_sub(4 + arrow.width()));
     let mut r = Row::default();

@@ -47,6 +47,7 @@ screen (from a local cache) and refreshes in the background.
 - Inline images (kitty graphics, sixel, iTerm2, or half-blocks as a fallback),
   an image viewer, and opening or downloading shared files.
 - Block Kit and attachments rendered the way Slack draws them, with clickable buttons.
+- App buttons, menus, checkboxes and pickers answer clicks (`blocks.actions`), asking first when the app wants a confirmation; tables, Markdown and input blocks are drawn.
 - Apps' messages with their name and picture; a click opens the app's profile.
 - Message actions: edit, delete, forward, save for later, remind me, mark as
   unread, copy link or text, follow/unfollow a thread.

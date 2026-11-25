@@ -1,6 +1,7 @@
 #[macro_use]
 mod i18n;
 mod account;
+mod actions;
 mod activity;
 mod app;
 mod attach;

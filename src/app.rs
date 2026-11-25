@@ -161,6 +161,8 @@ pub enum Event {
     Activity(crate::activity::Ev),
     /// "Invite people": your address's domain and the invitations sent (`invite`).
     Invite(crate::invite::Ev),
+    /// An app's button, menu or choice sent to it (`actions`).
+    Block(crate::actions::Ev),
 }
 
 /// Why the open conversation has a notice instead of a message box.
@@ -353,6 +355,8 @@ pub enum Action {
     Message(crate::edit::Item),
     /// An Activity row's entries.
     Activity(crate::activity::Act),
+    /// A choice in an app's overflow or select menu (`actions`).
+    Block(Box<crate::actions::Choice>),
 }
 
 /// The right-click menu; a submenu keeps the menu it came from.
@@ -660,6 +664,8 @@ pub struct App {
     pub login: Option<Login>,
     /// The new-message or new-channel dialog, over everything else.
     pub dialog: Option<crate::compose::Dialog>,
+    /// App buttons' picks and dialogs (`actions`).
+    pub block: crate::actions::State,
     pub compose_hover: bool,
     /// The folded sidebar's row under the mouse, named in a tooltip.
     pub rail_hover: Option<usize>,
@@ -840,6 +846,7 @@ impl App {
             resizing: false,
             login: None,
             dialog: None,
+            block: Default::default(),
             compose_hover: false,
             rail_hover: None,
             account: Default::default(),
@@ -2462,6 +2469,7 @@ impl App {
             Action::SetFilter(key, f) => self.set_section_filter(key, f),
             Action::CopyName(t) | Action::CopyLink(t) => self.copy(&t),
             Action::Browser(url) => self.open_url(&url),
+            Action::Block(c) => self.block_choice(*c),
             Action::File(click) => self.file_click(click, 0, 0),
             Action::Close(id) => {
                 if let Some(b) = self.boot.as_mut() {
@@ -3008,6 +3016,7 @@ impl App {
             Event::Update(note) => self.on_update(note),
             Event::Edit(e) => self.on_edit(e),
             Event::Progress => {}
+            Event::Block(e) => self.on_block(e),
             Event::Unfurled { ts, entity, res } => match res {
                 // The socket tells when the message changes; this is in case it's down.
                 Ok(()) => {
@@ -3773,6 +3782,9 @@ impl App {
         if self.dialog.is_some() {
             return self.dialog_key(k);
         }
+        if self.block.dialog.is_some() {
+            return self.block_key(k);
+        }
         if self.account.dialog.is_some() {
             return self.status_key(k);
         }
@@ -4119,6 +4131,9 @@ impl App {
         if self.details.is_some() {
             return self.details_mouse(m);
         }
+        if self.block.dialog.is_some() {
+            return self.block_mouse(m);
+        }
         if self.account.pause.is_some() {
             return self.pause_mouse(m);
         }
@@ -4353,13 +4368,13 @@ impl App {
                 return self.file_click(c.clone(), m.column, m.row);
             }
             if let Some((_, t)) = self.areas.buttons.iter().find(|(rect, _)| rect.contains(at)) {
-                let url = match t {
+                match t {
                     // A permalink to this workspace opens here, as in Slack.
                     crate::blocks::Target::Link(u) => return self.follow_link(&u.clone()),
-                    crate::blocks::Target::Button(b) => match &b.url {
-                        Some(u) => u.clone(),
-                        None => self.message_url(self.current.as_deref().unwrap_or(""), &b.ts),
-                    },
+                    crate::blocks::Target::Button(b) => {
+                        let thread = self.areas.thread.contains(at);
+                        return self.block_click(b.clone(), thread, m.column, m.row);
+                    }
                     // A channel we're not in opens all the same: its history reads fine.
                     crate::blocks::Target::Channel(id) => return self.open(id.clone()),
                     crate::blocks::Target::User(uid) => return self.open_dm(uid.clone()),
@@ -4422,9 +4437,7 @@ impl App {
                         self.dirty = true;
                         return;
                     }
-                };
-                self.open_url(&url);
-                return;
+                }
             }
             if let Some((_, r)) = self.areas.images.iter().find(|(rect, _)| rect.contains(at)) {
                 self.viewer = Some(r.clone());

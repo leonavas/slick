@@ -144,6 +144,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     crate::edit::draw(f, app);
     viewer(f, app);
     crate::compose::draw(f, app);
+    crate::actions::draw(f, app);
     crate::search::draw(f, app);
     crate::help::draw(f, app);
     login(f, app);
@@ -2393,6 +2394,7 @@ fn lines_with(
         // Block Kit and mrkdwn laid out at this width, then moved past the avatar.
         let mut pieces = blocks::parse(m, names);
         blocks::drop_author(&mut pieces, &author);
+        app.apply_picks(m, &mut pieces);
         for p in &mut pieces {
             if let blocks::Piece::Card(c) = p {
                 c.refresh = app.card_refresh(&c.ts, &c.entity);
